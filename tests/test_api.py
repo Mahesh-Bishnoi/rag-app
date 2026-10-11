@@ -115,7 +115,7 @@ def test_full_flow_text_put_complete_drain() -> None:
     assert final["status"] == "finished"
     assert final["chunk_count"] == 1
     assert final["error_code"] is None
-    assert docs.chunks[document_id][0].embedding == [0.0] * 768
+    assert docs.chunks_for(document_id)[0].embedding == [0.0] * 768
 
 
 def test_full_flow_pdf_put_complete_drain() -> None:

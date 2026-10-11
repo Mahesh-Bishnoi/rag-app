@@ -4,9 +4,9 @@ import logging
 import re
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from typing import cast
+from typing import Literal, TypeVar, cast
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
@@ -32,9 +32,10 @@ from rag_lab.core.models import (
     DocumentStatusView,
     IngestErrorCode,
     QaTrace,
+    RetrievalResult,
     Trace,
 )
-from rag_lab.graph.qa import QaGenerationError, run_qa
+from rag_lab.graph.qa import QaGenerationError, QaOutcome, run_qa
 
 logger = logging.getLogger(__name__)
 SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]")
@@ -42,7 +43,7 @@ ALLOWED_CONTENT_TYPES = {"text/plain", "text/markdown", "application/pdf"}
 
 
 class ChatMessage(BaseModel):
-    role: str
+    role: Literal["system", "user", "assistant"]
     content: str
 
 
@@ -94,12 +95,12 @@ class InitiateUploadResponse(BaseModel):
     expires_in: int
 
 
-def _build_storage(settings: Settings, stored: StoragePort | None) -> StoragePort:
-    if stored is not None:
-        return stored
-    if settings.azurite_connection_string:
-        return AzuriteBlobStorage(settings.azurite_connection_string, settings.blob_container)
-    return InMemoryStorage()
+T = TypeVar("T")
+
+
+def _port_of(stored: T | None, factory: Callable[[], T]) -> T:
+    """Test double when injected, otherwise the prod default. One owner for the pattern."""
+    return stored if stored is not None else factory()
 
 
 def _verify_blob(meta: BlobStat, declared_mime: str, max_bytes: int) -> IngestErrorCode | None:
@@ -215,101 +216,20 @@ def _complete_upload(
     return uploaded
 
 
-def _default_doc_store(resolved: Settings, stored: DocumentStorePort | None) -> DocumentStorePort:
-    if stored is not None:
-        return stored
-    return PostgresDocumentStore(get_engine(resolved.database_url))
-
-
-def _default_embedder(resolved: Settings, stored: EmbeddingPort | None) -> EmbeddingPort:
-    if stored is not None:
-        return stored
-    return OpenAICompatibleEmbedding(
-        base_url=resolved.embedding_base_url,
-        api_key=resolved.embedding_api_key,
-        model=resolved.embedding_model,
-    )
-
-
-def _default_retriever(resolved: Settings, stored: RetrievalPort | None) -> RetrievalPort:
-    if stored is not None:
-        return stored
-    return PostgresRetrieval(
-        get_engine(resolved.database_url),
-        expected_dim=resolved.embedding_dimensions,
-    )
-
-
-def _default_llm(resolved: Settings, stored: LlmPort | None) -> LlmPort:
-    if stored is not None:
-        return stored
-    return OpenAICompatibleLlm(
-        base_url=resolved.openai_base_url,
-        api_key=resolved.openai_api_key,
-        model=resolved.openai_model,
-    )
-
-
-def _default_trace_store(resolved: Settings, stored: TraceStorePort | None) -> TraceStorePort:
-    if stored is not None:
-        return stored
-    return PostgresTraceStore(get_engine(resolved.database_url))
-
-
-def _answer_question(
-    query: str,
-    model: str,
-    *,
-    embedder: EmbeddingPort,
-    retriever: RetrievalPort,
-    llm: LlmPort,
-    trace_store: TraceStorePort,
-    retrieval_candidates: int,
-    answer_context_chunks: int,
-) -> ChatCompletionResponse:
-    """Run the QA graph → save trace fail-open."""
-    trace_id = uuid.uuid4().hex
-    try:
-        outcome = run_qa(
-            embedder=embedder,
-            retriever=retriever,
-            llm=llm,
-            query=query,
-            retrieval_candidates=retrieval_candidates,
-            answer_context_chunks=answer_context_chunks,
-        )
-    except QaGenerationError:
-        logger.exception("generation failed")
-        raise HTTPException(status_code=500, detail="generation failed") from None
-    except Exception:
-        logger.exception("query retrieval failed")
-        raise HTTPException(status_code=500, detail="retrieval failed") from None
-    candidates = outcome["candidates"]
-    reranked = outcome["reranked"]
-    prompt = outcome["prompt"]
-    answer = outcome["answer"]
-    trace = Trace(
+def _build_trace(trace_id: str, query: str, outcome: QaOutcome) -> Trace:
+    """Trace record from graph outcome. Pure."""
+    return Trace(
         trace_id=trace_id,
         query=query,
-        retrieved=candidates,
-        rerank_order=[result.chunk.id or "" for result in reranked],
-        prompt=prompt,
+        retrieved=outcome["candidates"],
+        rerank_order=[result.chunk.id or "" for result in outcome["reranked"]],
+        prompt=outcome["prompt"],
     )
-    logger.info(
-        "qa answered",
-        extra={
-            "event": "qa_answered",
-            "trace_id": trace.trace_id,
-            "query_chars": len(trace.query),
-            "retrieved": [
-                (result.chunk.id, result.vector_score, result.bm25_score, result.fused_rank)
-                for result in trace.retrieved
-            ],
-            "rerank_order": trace.rerank_order,
-            "prompt_chars": len(trace.prompt),
-        },
-    )
-    citations = [
+
+
+def _trace_citations(reranked: list[RetrievalResult]) -> list[Citation]:
+    """Citations from reranked chunks. Pure."""
+    return [
         Citation(
             chunk_id=result.chunk.id or "",
             source=result.chunk.title,
@@ -319,10 +239,12 @@ def _answer_question(
         )
         for result in reranked
     ]
-    try:
-        trace_store.save(trace, answer, citations)
-    except Exception:
-        logger.exception("trace save failed for %s", trace_id)
+
+
+def _build_chat_response(
+    trace_id: str, model: str, answer: str, citations: list[Citation]
+) -> ChatCompletionResponse:
+    """HTTP response envelope for a finished answer. Pure."""
     return ChatCompletionResponse(
         id=f"chatcmpl-{trace_id}",
         object="chat.completion",
@@ -339,8 +261,70 @@ def _answer_question(
     )
 
 
+def _log_answered(trace: Trace) -> None:
+    logger.info(
+        "qa answered",
+        extra={
+            "event": "qa_answered",
+            "trace_id": trace.trace_id,
+            "query_chars": len(trace.query),
+            "retrieved": [
+                (result.chunk.id, result.vector_score, result.bm25_score, result.fused_rank)
+                for result in trace.retrieved
+            ],
+            "rerank_order": trace.rerank_order,
+            "prompt_chars": len(trace.prompt),
+        },
+    )
+
+
+def _answer_question(
+    query: str,
+    model: str,
+    *,
+    embedder: EmbeddingPort,
+    retriever: RetrievalPort,
+    llm: LlmPort,
+    trace_store: TraceStorePort,
+    retrieval_candidates: int,
+    answer_context_chunks: int,
+) -> ChatCompletionResponse:
+    """Run the QA graph → log → save trace fail-open → respond."""
+    trace_id = uuid.uuid4().hex
+    try:
+        outcome = run_qa(
+            embedder=embedder,
+            retriever=retriever,
+            llm=llm,
+            query=query,
+            retrieval_candidates=retrieval_candidates,
+            answer_context_chunks=answer_context_chunks,
+        )
+    except QaGenerationError:
+        logger.exception("generation failed")
+        raise HTTPException(status_code=500, detail="generation failed") from None
+    except Exception:
+        logger.exception("query retrieval failed")
+        raise HTTPException(status_code=500, detail="retrieval failed") from None
+    trace = _build_trace(trace_id, query, outcome)
+    _log_answered(trace)
+    citations = _trace_citations(outcome["reranked"])
+    try:
+        trace_store.save(trace, outcome["answer"], citations)
+    except Exception:
+        logger.exception("trace save failed for %s", trace_id)
+    return _build_chat_response(trace_id, model, outcome["answer"], citations)
+
+
 def _storage_of(app: FastAPI, resolved: Settings) -> StoragePort:
-    return _build_storage(resolved, cast(StoragePort | None, app.state.storage))
+    def _default() -> StoragePort:
+        if resolved.azurite_connection_string:
+            return AzuriteBlobStorage(
+                resolved.azurite_connection_string, resolved.blob_container
+            )
+        return InMemoryStorage()
+
+    return _port_of(cast(StoragePort | None, app.state.storage), _default)
 
 
 def _ensure_emulator_cors(store: StoragePort, origins: list[str]) -> None:
@@ -359,23 +343,49 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 def _doc_store_of(app: FastAPI, resolved: Settings) -> DocumentStorePort:
-    return _default_doc_store(resolved, cast(DocumentStorePort | None, app.state.doc_store))
+    return _port_of(
+        cast(DocumentStorePort | None, app.state.doc_store),
+        lambda: PostgresDocumentStore(get_engine(resolved.database_url)),
+    )
 
 
 def _embedder_of(app: FastAPI, resolved: Settings) -> EmbeddingPort:
-    return _default_embedder(resolved, cast(EmbeddingPort | None, app.state.embedder))
+    return _port_of(
+        cast(EmbeddingPort | None, app.state.embedder),
+        lambda: OpenAICompatibleEmbedding(
+            base_url=resolved.embedding_base_url,
+            api_key=resolved.embedding_api_key,
+            model=resolved.embedding_model,
+        ),
+    )
 
 
 def _retriever_of(app: FastAPI, resolved: Settings) -> RetrievalPort:
-    return _default_retriever(resolved, cast(RetrievalPort | None, app.state.retriever))
+    return _port_of(
+        cast(RetrievalPort | None, app.state.retriever),
+        lambda: PostgresRetrieval(
+            get_engine(resolved.database_url),
+            expected_dim=resolved.embedding_dimensions,
+        ),
+    )
 
 
 def _llm_of(app: FastAPI, resolved: Settings) -> LlmPort:
-    return _default_llm(resolved, cast(LlmPort | None, app.state.llm))
+    return _port_of(
+        cast(LlmPort | None, app.state.llm),
+        lambda: OpenAICompatibleLlm(
+            base_url=resolved.openai_base_url,
+            api_key=resolved.openai_api_key,
+            model=resolved.openai_model,
+        ),
+    )
 
 
 def _trace_store_of(app: FastAPI, resolved: Settings) -> TraceStorePort:
-    return _default_trace_store(resolved, cast(TraceStorePort | None, app.state.trace_store))
+    return _port_of(
+        cast(TraceStorePort | None, app.state.trace_store),
+        lambda: PostgresTraceStore(get_engine(resolved.database_url)),
+    )
 
 
 def _get_trace_record(trace_store: TraceStorePort, trace_id: str) -> QaTrace:

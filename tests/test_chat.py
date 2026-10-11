@@ -180,8 +180,8 @@ def test_chat_full_ingest_to_answer_flow() -> None:
     storage.put(name, b"hello rag", "text/plain")
     assert client.post(f"/v1/kb/uploads/{document_id}/complete").json()["status"] == "uploaded"
     assert drain(docs, storage, StubEmbedding(dim=3, value=0.5), [TextLoader(), PdfLoader()]) == 1
-    for chunks in docs.chunks.values():
-        retriever.add(chunks)
+    for document_id in docs.document_ids():
+        retriever.add(docs.chunks_for(document_id))
 
     body = ask(client, "hello?")
     message = cast("dict[str, object]", choice_list(body)[0]["message"])

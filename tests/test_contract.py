@@ -152,8 +152,8 @@ def test_issue_url_failure_fails_row_instead_of_orphaning() -> None:
         json={"filename": "note.txt", "content_type": "text/plain", "size_bytes": 9},
     )
     assert response.status_code == 500
-    assert len(docs.documents) == 1
-    document_id = next(iter(docs.documents))
+    assert len(docs.document_ids()) == 1
+    document_id = docs.document_ids()[0]
     view = docs.get_status(document_id)
     assert view is not None
     assert (view.status, view.error_code) == ("failed", "upload_incomplete")

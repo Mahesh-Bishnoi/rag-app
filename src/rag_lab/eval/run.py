@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import cast
 
 from rag_lab.adapters.rerank import rerank_candidates
 from rag_lab.adapters.retrieval import InMemoryRetrieval
@@ -27,6 +28,16 @@ MIN_RETRIEVAL_HIT_AT_1 = 1.0
 MIN_RERANK_TOP1_RATE = 1.0
 MIN_MEAN_KEYWORD_COVERAGE = 1.0
 MIN_MEAN_GROUNDEDNESS = 0.8
+
+
+@dataclass(frozen=True)
+class EvalThresholds:
+    """Injectable pass gates; defaults mirror the MIN_* constants above."""
+
+    retrieval_hit_at_1: float = MIN_RETRIEVAL_HIT_AT_1
+    rerank_top1_rate: float = MIN_RERANK_TOP1_RATE
+    mean_keyword_coverage: float = MIN_MEAN_KEYWORD_COVERAGE
+    mean_groundedness: float = MIN_MEAN_GROUNDEDNESS
 
 
 @dataclass
@@ -71,39 +82,66 @@ class SuiteSummary:
             return 0.0
         return sum(r.groundedness for r in self.results) / len(self.results)
 
-    def passes(self) -> bool:
+    def passes(self, thresholds: EvalThresholds | None = None) -> bool:
+        gates = thresholds or EvalThresholds()
         return (
-            self.retrieval_hit_rate >= MIN_RETRIEVAL_HIT_AT_1
-            and self.rerank_top1_rate >= MIN_RERANK_TOP1_RATE
-            and self.mean_keyword_coverage >= MIN_MEAN_KEYWORD_COVERAGE
-            and self.mean_groundedness >= MIN_MEAN_GROUNDEDNESS
+            self.retrieval_hit_rate >= gates.retrieval_hit_at_1
+            and self.rerank_top1_rate >= gates.rerank_top1_rate
+            and self.mean_keyword_coverage >= gates.mean_keyword_coverage
+            and self.mean_groundedness >= gates.mean_groundedness
         )
 
 
-def evaluate_item(item: dict[str, object]) -> ItemResult:
-    """Run one golden item through search → rerank → metric checks.
+def _require_text(item: dict[str, object], key: str) -> str:
+    value = item.get(key)
+    if not isinstance(value, str):
+        raise ValueError(
+            "golden item needs string id/query/relevant_content/relevant_title/answer"
+        )
+    return value
 
-    Deterministic and hermetic (in-memory fake only), not pure: it builds
-    a seeded InMemoryRetrieval per item.
-    """
-    raw_id = item.get("id")
-    raw_query = item.get("query")
-    raw_content = item.get("relevant_content")
-    raw_title = item.get("relevant_title")
-    raw_answer = item.get("answer")
-    if not all(
-        isinstance(value, str) for value in (raw_id, raw_query, raw_content, raw_title, raw_answer)
-    ):
-        raise ValueError("golden item needs string id/query/relevant_content/relevant_title/answer")
-    item_id = str(raw_id)
-    query = str(raw_query)
-    relevant_content = str(raw_content)
-    relevant_title = str(raw_title)
-    answer = str(raw_answer)
-    relevant_id = f"a-{item_id}"
+
+def _parse_eval_item(
+    item: dict[str, object],
+) -> tuple[str, str, str, str, str, list[dict[str, object]], list[str]]:
+    """Validate the golden dict once at the boundary; inner code trusts the types."""
+    item_id = _require_text(item, "id")
+    query = _require_text(item, "query")
+    relevant_content = _require_text(item, "relevant_content")
+    relevant_title = _require_text(item, "relevant_title")
+    answer = _require_text(item, "answer")
     distractors = item.get("distractors")
     if not isinstance(distractors, list) or len(distractors) != 2:
         raise ValueError(f"golden item {item_id} needs exactly 2 distractors")
+    for index, distractor in enumerate(distractors):
+        if not isinstance(distractor, dict):
+            raise ValueError(f"golden item {item_id} distractor {index} must be an object")
+        if not isinstance(distractor.get("content"), str) or not isinstance(
+            distractor.get("title"), str
+        ):
+            raise ValueError(
+                f"golden item {item_id} distractor {index} needs string content/title"
+            )
+    raw_keywords = item.get("expected_keywords")
+    if not isinstance(raw_keywords, list):
+        raise ValueError(f"golden item {item_id} needs an expected_keywords list")
+    typed_distractors = cast("list[dict[str, object]]", distractors)
+    return (
+        item_id,
+        query,
+        relevant_content,
+        relevant_title,
+        answer,
+        typed_distractors,
+        [str(keyword) for keyword in raw_keywords],
+    )
+
+
+def _build_eval_chunks(
+    item_id: str, relevant_content: str, relevant_title: str, distractors: list[dict[str, object]]
+) -> tuple[list[Chunk], str]:
+    """Seed chunks: relevant passage plus two distractors with fixed vectors."""
+    relevant_id = f"a-{item_id}"
     chunks = [
         Chunk(
             id=relevant_id,
@@ -113,29 +151,32 @@ def evaluate_item(item: dict[str, object]) -> ItemResult:
         )
     ]
     for index, distractor in enumerate(distractors):
-        if not isinstance(distractor, dict):
-            raise ValueError(f"golden item {item_id} distractor {index} must be an object")
-        raw_dc = distractor.get("content")
-        raw_dt = distractor.get("title")
-        if not isinstance(raw_dc, str) or not isinstance(raw_dt, str):
-            raise ValueError(f"golden item {item_id} distractor {index} needs string content/title")
         chunks.append(
             Chunk(
                 id=f"{'m' if index == 0 else 'z'}-{item_id}",
-                content=raw_dc,
-                title=raw_dt,
+                content=str(distractor["content"]),
+                title=str(distractor["title"]),
                 embedding=list(DISTRACTOR_VECTORS[index]),
             )
         )
+    return chunks, relevant_id
+
+
+def evaluate_item(item: dict[str, object]) -> ItemResult:
+    """Run one golden item through search → rerank → metric checks.
+
+    Deterministic and hermetic (in-memory fake only), not pure: it builds
+    a seeded InMemoryRetrieval per item.
+    """
+    item_id, query, relevant_content, relevant_title, answer, distractors, keywords = (
+        _parse_eval_item(item)
+    )
+    chunks, relevant_id = _build_eval_chunks(item_id, relevant_content, relevant_title, distractors)
     retriever = InMemoryRetrieval(chunks)
     results = retriever.search(list(RELEVANT_VECTOR), query, 3)
     ranked_ids = [result.chunk.id or "" for result in results]
     reranked = rerank_candidates(query, results, 1)
     top1 = reranked[0].chunk.id or "" if reranked else ""
-    raw_keywords = item.get("expected_keywords")
-    if not isinstance(raw_keywords, list):
-        raise ValueError(f"golden item {item_id} needs an expected_keywords list")
-    keywords = [str(keyword) for keyword in raw_keywords]
     return ItemResult(
         item_id=item_id,
         retrieved_hit=hit_at_k(ranked_ids, relevant_id, 1),

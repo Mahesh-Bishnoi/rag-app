@@ -43,66 +43,74 @@ class InMemoryDocumentStore:
     """Test fake sharing the DocumentStorePort interface."""
 
     def __init__(self) -> None:
-        self.documents: dict[str, Document] = {}
-        self.chunks: dict[str, list[Chunk]] = {}
-        self.statuses: dict[str, DocumentStatus] = {}
-        self.errors: dict[str, IngestErrorCode | None] = {}
+        self._documents: dict[str, Document] = {}
+        self._chunks: dict[str, list[Chunk]] = {}
+        self._statuses: dict[str, DocumentStatus] = {}
+        self._errors: dict[str, IngestErrorCode | None] = {}
+
+    def chunks_for(self, document_id: str) -> list[Chunk]:
+        """Chunks finished for a document; empty when unknown or unfinished."""
+        return list(self._chunks.get(document_id, []))
+
+    def document_ids(self) -> list[str]:
+        """Initiated document ids, in initiation order."""
+        return list(self._documents.keys())
 
     def initiate(self, document: Document) -> str:
         document_id = str(uuid.uuid4())
-        self.documents[document_id] = document.model_copy(update={"id": document_id})
-        self.chunks[document_id] = []
-        self.statuses[document_id] = "initiated"
-        self.errors[document_id] = None
+        self._documents[document_id] = document.model_copy(update={"id": document_id})
+        self._chunks[document_id] = []
+        self._statuses[document_id] = "initiated"
+        self._errors[document_id] = None
         return document_id
 
     def get_document(self, document_id: str) -> Document | None:
-        return self.documents.get(document_id)
+        return self._documents.get(document_id)
 
     def mark_uploaded(self, document_id: str) -> DocumentStatusView | None:
-        if document_id not in self.documents:
+        if document_id not in self._documents:
             return None
-        if self.statuses[document_id] == "initiated":
-            self.statuses[document_id] = "uploaded"
+        if self._statuses[document_id] == "initiated":
+            self._statuses[document_id] = "uploaded"
         return self.get_status(document_id)
 
     def fail(self, document_id: str, error_code: IngestErrorCode) -> DocumentStatusView | None:
-        if document_id not in self.documents:
+        if document_id not in self._documents:
             return None
-        self.statuses[document_id] = "failed"
-        self.errors[document_id] = error_code
+        self._statuses[document_id] = "failed"
+        self._errors[document_id] = error_code
         return self.get_status(document_id)
 
     def claim_next(self) -> Document | None:
-        for document_id, status in self.statuses.items():
+        for document_id, status in self._statuses.items():
             if status == "uploaded":
-                self.statuses[document_id] = "chunking"
-                return self.documents[document_id]
+                self._statuses[document_id] = "chunking"
+                return self._documents[document_id]
         return None
 
     def mark_embedding(self, document_id: str) -> None:
-        if document_id in self.statuses:
-            self.statuses[document_id] = "embedding"
+        if document_id in self._statuses:
+            self._statuses[document_id] = "embedding"
 
     def finish(self, document_id: str, chunks: list[Chunk]) -> None:
-        if document_id not in self.documents:
+        if document_id not in self._documents:
             raise ValueError(f"unknown document {document_id}")
         if not chunks:
             raise ValueError("chunks must not be empty")
-        self.chunks[document_id] = [
+        self._chunks[document_id] = [
             chunk.model_copy(update={"id": str(uuid.uuid4()), "document_id": document_id})
             for chunk in chunks
         ]
-        self.statuses[document_id] = "finished"
+        self._statuses[document_id] = "finished"
 
     def get_status(self, document_id: str) -> DocumentStatusView | None:
-        if document_id not in self.documents:
+        if document_id not in self._documents:
             return None
         return DocumentStatusView(
             document_id=document_id,
-            status=self.statuses[document_id],
-            chunk_count=len(self.chunks[document_id]),
-            error_code=self.errors[document_id],
+            status=self._statuses[document_id],
+            chunk_count=len(self._chunks[document_id]),
+            error_code=self._errors[document_id],
         )
 
 

@@ -47,15 +47,15 @@ def _select_loader(
     )
 
 
-def _embed(chunks: list[Chunk], embedder: EmbeddingPort) -> list[Chunk] | None:
-    """One vector per chunk. None means the provider failed or misaligned."""
+def _embed(chunks: list[Chunk], embedder: EmbeddingPort) -> list[Chunk]:
+    """One vector per chunk. Raises _IngestFailure when the provider misbehaves."""
     try:
         vectors = embedder.embed([chunk.content for chunk in chunks])
-    except Exception:
+    except Exception as e:
         logger.exception("chunk embedding failed")
-        return None
+        raise _IngestFailure("embed_failed") from e
     if len(vectors) != len(chunks):
-        return None
+        raise _IngestFailure("embed_failed")
     return [
         chunk.model_copy(update={"embedding": vector})
         for chunk, vector in zip(chunks, vectors, strict=True)
@@ -106,10 +106,7 @@ def _add_persist_nodes(graph: Graph, doc_store: DocumentStorePort, embedder: Emb
             doc_store.mark_embedding(state["document_id"])
         except Exception as e:
             raise _IngestFailure("persist_failed") from e
-        embedded = _embed(state["chunks"], embedder)
-        if embedded is None:
-            raise _IngestFailure("embed_failed")
-        return {"chunks": embedded}
+        return {"chunks": _embed(state["chunks"], embedder)}
 
     def _finish(state: IngestState) -> dict[str, object]:
         try:

@@ -43,7 +43,7 @@ def test_drain_finishes_text_with_embeddings() -> None:
     assert view is not None
     assert view.status == "finished"
     assert view.chunk_count == 1
-    assert docs.chunks[document_id][0].embedding == [0.0] * 768
+    assert docs.chunks_for(document_id)[0].embedding == [0.0] * 768
 
 
 def test_drain_splits_markdown_and_keeps_heading_path() -> None:
@@ -54,7 +54,10 @@ def test_drain_splits_markdown_and_keeps_heading_path() -> None:
     assert view is not None
     assert view.status == "finished"
     assert view.chunk_count == 2
-    assert [chunk.heading_path for chunk in docs.chunks[document_id]] == ["Alpha", "Alpha > Beta"]
+    assert [chunk.heading_path for chunk in docs.chunks_for(document_id)] == [
+        "Alpha",
+        "Alpha > Beta",
+    ]
 
 
 def test_drain_ingests_pdf_pages() -> None:
@@ -66,7 +69,7 @@ def test_drain_ingests_pdf_pages() -> None:
     assert view is not None
     assert view.status == "finished"
     assert view.chunk_count == 2
-    assert [chunk.page for chunk in docs.chunks[document_id]] == [1, 2]
+    assert [chunk.page for chunk in docs.chunks_for(document_id)] == [1, 2]
 
 
 def test_drain_is_idle_without_uploaded_rows() -> None:
