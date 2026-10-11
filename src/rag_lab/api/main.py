@@ -120,7 +120,13 @@ def _initiate_upload(
     storage: StoragePort,
     doc_store: DocumentStorePort,
 ) -> InitiateUploadResponse:
-    """Validate → mint signed URL → persist initiated row. One side effect per line."""
+    """Validate → persist initiated row → mint signed URL.
+
+    The row is persisted before any signed URL is minted so a DB failure
+    never hands out a URL no document references. If URL minting fails
+    afterwards, the row is failed best-effort (upload_incomplete) rather
+    than left initiated forever.
+    """
     if body.content_type not in ALLOWED_CONTENT_TYPES:
         raise HTTPException(status_code=415, detail="unsupported media type")
     if body.size_bytes > max_upload_bytes:
@@ -129,12 +135,7 @@ def _initiate_upload(
     if not sanitized.strip("._"):
         raise HTTPException(status_code=422, detail="invalid filename")
     key = f"{uuid.uuid4()}-{sanitized}"
-    try:
-        canonical = storage.blob_url(key)
-        upload_url, expires_in = storage.issue_upload_url(key, body.content_type)
-    except Exception:
-        logger.exception("upload URL issue failed")
-        raise HTTPException(status_code=500, detail="ingest failed") from None
+    canonical = storage.blob_url(key)
     document = Document(
         source=body.filename,
         title=sanitized,
@@ -146,14 +147,24 @@ def _initiate_upload(
     except Exception:
         logger.exception("document initiate failed")
         raise HTTPException(status_code=500, detail="ingest failed") from None
+    try:
+        upload_url, expires_in = storage.issue_upload_url(key, body.content_type)
+    except Exception:
+        logger.exception("upload URL issue failed for %s", document_id)
+        try:
+            doc_store.fail(document_id, "upload_incomplete")
+        except Exception:
+            logger.exception("upload URL cleanup failed for %s", document_id)
+        raise HTTPException(status_code=500, detail="ingest failed") from None
     return InitiateUploadResponse(
         document_id=document_id, upload_url=upload_url, expires_in=expires_in
     )
 
 
-def _fail_or_404(
+def _mark_failed_or_404(
     doc_store: DocumentStorePort, document_id: str, error_code: IngestErrorCode
 ) -> DocumentStatusView:
+    """Record a typed ingest failure, or 404 when the document is unknown."""
     failed = doc_store.fail(document_id, error_code)
     if failed is None:
         raise HTTPException(status_code=404, detail="unknown document")
@@ -174,7 +185,12 @@ def _complete_upload(
     storage: StoragePort,
     doc_store: DocumentStorePort,
 ) -> DocumentStatusView:
-    """HEAD the blob → flip initiated to uploaded, or record a typed failure."""
+    """HEAD the blob → flip initiated to uploaded, or record a typed failure.
+
+    Contract note: validation-time faults on initiate surface as 4xx, while
+    completion-time faults surface as 200 with a failed status view carrying
+    a typed error_code — the client must check the body, not just the code.
+    """
     current = doc_store.get_status(document_id)
     if current is None:
         raise HTTPException(status_code=404, detail="unknown document")
@@ -189,10 +205,10 @@ def _complete_upload(
         logger.exception("blob stat failed for %s", document_id)
         raise HTTPException(status_code=500, detail="ingest failed") from None
     if meta is None:
-        return _fail_or_404(doc_store, document_id, "upload_incomplete")
+        return _mark_failed_or_404(doc_store, document_id, "upload_incomplete")
     code = _verify_blob(meta, doc.mime, max_upload_bytes)
     if code is not None:
-        return _fail_or_404(doc_store, document_id, code)
+        return _mark_failed_or_404(doc_store, document_id, code)
     uploaded = doc_store.mark_uploaded(document_id)
     if uploaded is None:
         raise HTTPException(status_code=404, detail="unknown document")
@@ -284,7 +300,7 @@ def _answer_question(
         extra={
             "event": "qa_answered",
             "trace_id": trace.trace_id,
-            "query": trace.query,
+            "query_chars": len(trace.query),
             "retrieved": [
                 (result.chunk.id, result.vector_score, result.bm25_score, result.fused_rank)
                 for result in trace.retrieved
@@ -324,13 +340,11 @@ def _answer_question(
 
 
 def _storage_of(app: FastAPI, resolved: Settings) -> StoragePort:
-    return _build_storage(resolved, cast("StoragePort | None", app.state.storage))
+    return _build_storage(resolved, cast(StoragePort | None, app.state.storage))
 
 
 def _ensure_emulator_cors(store: StoragePort, origins: list[str]) -> None:
     """Write dev CORS rules at startup; fail open so the API still serves."""
-    if not isinstance(store, AzuriteBlobStorage):
-        return
     try:
         store.ensure_cors(origins)
     except Exception:
@@ -339,29 +353,29 @@ def _ensure_emulator_cors(store: StoragePort, origins: list[str]) -> None:
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
-    resolved = cast("Settings", app.state.settings)
+    resolved = cast(Settings, app.state.settings)
     _ensure_emulator_cors(_storage_of(app, resolved), resolved.blob_cors_origins)
     yield
 
 
 def _doc_store_of(app: FastAPI, resolved: Settings) -> DocumentStorePort:
-    return _default_doc_store(resolved, cast("DocumentStorePort | None", app.state.doc_store))
+    return _default_doc_store(resolved, cast(DocumentStorePort | None, app.state.doc_store))
 
 
 def _embedder_of(app: FastAPI, resolved: Settings) -> EmbeddingPort:
-    return _default_embedder(resolved, cast("EmbeddingPort | None", app.state.embedder))
+    return _default_embedder(resolved, cast(EmbeddingPort | None, app.state.embedder))
 
 
 def _retriever_of(app: FastAPI, resolved: Settings) -> RetrievalPort:
-    return _default_retriever(resolved, cast("RetrievalPort | None", app.state.retriever))
+    return _default_retriever(resolved, cast(RetrievalPort | None, app.state.retriever))
 
 
 def _llm_of(app: FastAPI, resolved: Settings) -> LlmPort:
-    return _default_llm(resolved, cast("LlmPort | None", app.state.llm))
+    return _default_llm(resolved, cast(LlmPort | None, app.state.llm))
 
 
 def _trace_store_of(app: FastAPI, resolved: Settings) -> TraceStorePort:
-    return _default_trace_store(resolved, cast("TraceStorePort | None", app.state.trace_store))
+    return _default_trace_store(resolved, cast(TraceStorePort | None, app.state.trace_store))
 
 
 def _get_trace_record(trace_store: TraceStorePort, trace_id: str) -> QaTrace:

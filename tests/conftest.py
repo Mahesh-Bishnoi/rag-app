@@ -1,10 +1,6 @@
-import sys
 from io import BytesIO
-from pathlib import Path
 
 from pypdf import PdfWriter
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 
 def minimal_pdf(texts: list[str]) -> bytes:

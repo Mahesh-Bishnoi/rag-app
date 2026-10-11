@@ -52,6 +52,7 @@ def _embed(chunks: list[Chunk], embedder: EmbeddingPort) -> list[Chunk] | None:
     try:
         vectors = embedder.embed([chunk.content for chunk in chunks])
     except Exception:
+        logger.exception("chunk embedding failed")
         return None
     if len(vectors) != len(chunks):
         return None
@@ -68,7 +69,10 @@ def _add_prepare_nodes(graph: Graph, storage: StoragePort, loaders: list[LoaderP
     """Download → load → split nodes: bytes in, unembedded chunks out."""
 
     def _download(state: IngestState) -> dict[str, object]:
-        data = storage.download(blob_name(state["blob_url"]))
+        try:
+            data = storage.download(blob_name(state["blob_url"]))
+        except Exception as e:
+            raise _IngestFailure("persist_failed") from e
         if data is None:
             raise _IngestFailure("blob_missing")
         return {"data": data}
@@ -98,10 +102,12 @@ def _add_persist_nodes(graph: Graph, doc_store: DocumentStorePort, embedder: Emb
     """Embed → finish nodes: chunks in, finished document out."""
 
     def _embed_chunks(state: IngestState) -> dict[str, object]:
-        doc_store.mark_embedding(state["document_id"])
+        try:
+            doc_store.mark_embedding(state["document_id"])
+        except Exception as e:
+            raise _IngestFailure("persist_failed") from e
         embedded = _embed(state["chunks"], embedder)
         if embedded is None:
-            logger.exception("chunk embedding failed for %s", state["document_id"])
             raise _IngestFailure("embed_failed")
         return {"chunks": embedded}
 
@@ -142,8 +148,17 @@ def run_ingest_one(
     embedder: EmbeddingPort,
     loaders: list[LoaderPort],
 ) -> str | None:
-    """Claim and ingest one uploaded document. Returns its id, or None if idle."""
-    claimed = doc_store.claim_next()
+    """Claim and ingest one uploaded document. Returns its id, or None if idle.
+
+    Every failure after a successful claim lands the document in failed:
+    typed _IngestFailure maps to its code, unexpected infra errors map to
+    persist_failed so no document wedges in uploaded/embedding forever.
+    """
+    try:
+        claimed = doc_store.claim_next()
+    except Exception:
+        logger.exception("ingest claim failed")
+        return None
     if claimed is None or claimed.id is None:
         return None
     document_id = claimed.id
@@ -157,5 +172,18 @@ def run_ingest_one(
             }
         )
     except _IngestFailure as failure:
-        doc_store.fail(document_id, failure.code)
+        _fail_best_effort(doc_store, document_id, failure.code)
+    except Exception:
+        logger.exception("unexpected ingest failure for %s", document_id)
+        _fail_best_effort(doc_store, document_id, "persist_failed")
     return document_id
+
+
+def _fail_best_effort(
+    doc_store: DocumentStorePort, document_id: str, code: IngestErrorCode
+) -> None:
+    """Record the failure; a failing fail() must not wedge the worker loop."""
+    try:
+        doc_store.fail(document_id, code)
+    except Exception:
+        logger.exception("ingest fail-record failed for %s", document_id)

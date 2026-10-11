@@ -1,10 +1,11 @@
 """Embedding transport behind a port. Production adapter speaks OpenAI REST."""
 
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from openai import OpenAI
 
 
+@runtime_checkable
 class EmbeddingPort(Protocol):
     def embed(self, texts: list[str]) -> list[list[float]]: ...
 

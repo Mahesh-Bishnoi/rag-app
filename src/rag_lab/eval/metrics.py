@@ -1,6 +1,6 @@
 """Heuristic eval metrics (ADR-0015). Pure functions, no IO."""
 
-from rag_lab.adapters.retrieval import tokenize
+from rag_lab.core.text import tokenize
 
 
 def hit_at_k(ranked_ids: list[str], expected_id: str, k: int) -> bool:

@@ -1,13 +1,14 @@
 """Loader port: detect → extract (text + structure) → emit chunks."""
 
 from io import BytesIO
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from pypdf import PdfReader
 
 from rag_lab.core.models import Chunk
 
 
+@runtime_checkable
 class LoaderPort(Protocol):
     mime: str
 
@@ -19,7 +20,8 @@ class TextLoader:
     mime = "text/plain"
 
     def can_handle(self, filename: str, content_type: str) -> bool:
-        return filename.endswith((".txt", ".md")) or content_type.startswith("text/")
+        lowered = filename.lower()
+        return lowered.endswith((".txt", ".md")) or (content_type or "").startswith("text/")
 
     def load(self, data: bytes, source: str) -> list[Chunk]:
         text = data.decode("utf-8", errors="strict")

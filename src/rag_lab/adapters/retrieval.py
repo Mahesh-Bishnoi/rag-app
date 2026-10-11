@@ -6,24 +6,24 @@ RetrievalResults ordered best-first with 1-based fused_rank.
 """
 
 import math
-import re
 import uuid
 from collections import Counter
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from sqlalchemy import Engine, text
 from sqlmodel import Session, SQLModel, select
 
 from rag_lab.adapters.tables import ChunkRow
 from rag_lab.core.models import Chunk, RetrievalResult
+from rag_lab.core.text import tokenize
 
 RRF_K = 60
-_TOKEN = re.compile(r"[a-z0-9]+")
 
 
-def tokenize(text_value: str) -> list[str]:
-    """Lowercase alphanumeric tokens. Shared by keyword scoring and rerank."""
-    return _TOKEN.findall(text_value.lower())
+def validate_limit(limit: int) -> None:
+    """Shared guard: search and rerank limits must be positive."""
+    if limit <= 0:
+        raise ValueError("limit must be positive")
 
 
 def cosine(left: list[float], right: list[float]) -> float:
@@ -69,8 +69,7 @@ def rrf_fuse(ranked: list[list[str]], limit: int) -> list[tuple[str, int]]:
     Returns (chunk_id, 1-based fused rank) best-first; ties break on id so
     fusion is deterministic.
     """
-    if limit <= 0:
-        raise ValueError("limit must be positive")
+    validate_limit(limit)
     fused: dict[str, float] = {}
     for ids in ranked:
         for rank, chunk_id in enumerate(ids, start=1):
@@ -79,6 +78,7 @@ def rrf_fuse(ranked: list[list[str]], limit: int) -> list[tuple[str, int]]:
     return [(chunk_id, rank) for rank, (chunk_id, _) in enumerate(ordered[:limit], start=1)]
 
 
+@runtime_checkable
 class RetrievalPort(Protocol):
     def search(
         self, query_embedding: list[float], query_text: str, limit: int
@@ -97,13 +97,13 @@ class InMemoryRetrieval:
     def search(
         self, query_embedding: list[float], query_text: str, limit: int
     ) -> list[RetrievalResult]:
-        if limit <= 0:
-            raise ValueError("limit must be positive")
+        validate_limit(limit)
         if not self._chunks:
             return []
         ids = [chunk.id or f"mem-{index}" for index, chunk in enumerate(self._chunks)]
+        dim = len(query_embedding)
         vector_scores = [
-            cosine(query_embedding, _or_zero(chunk.embedding, len(query_embedding)))
+            cosine(query_embedding, _zero_fill_missing_embedding(chunk.embedding, dim))
             for chunk in self._chunks
         ]
         keyword_scores = bm25_scores(
@@ -130,8 +130,7 @@ class PostgresRetrieval:
     def search(
         self, query_embedding: list[float], query_text: str, limit: int
     ) -> list[RetrievalResult]:
-        if limit <= 0:
-            raise ValueError("limit must be positive")
+        validate_limit(limit)
         if len(query_embedding) != self._expected_dim:
             raise ValueError(f"query dim {len(query_embedding)} != expected {self._expected_dim}")
         literal = "[" + ",".join(repr(float(value)) for value in query_embedding) + "]"
@@ -213,7 +212,7 @@ class PostgresRetrieval:
         return results
 
 
-def _or_zero(embedding: list[float] | None, dim: int) -> list[float]:
+def _zero_fill_missing_embedding(embedding: list[float] | None, dim: int) -> list[float]:
     return embedding if embedding is not None else [0.0] * dim
 
 

@@ -49,18 +49,26 @@ class SuiteSummary:
 
     @property
     def retrieval_hit_rate(self) -> float:
+        if not self.results:
+            return 0.0
         return sum(1 for r in self.results if r.retrieved_hit) / len(self.results)
 
     @property
     def rerank_top1_rate(self) -> float:
+        if not self.results:
+            return 0.0
         return sum(1 for r in self.results if r.rerank_top1) / len(self.results)
 
     @property
     def mean_keyword_coverage(self) -> float:
+        if not self.results:
+            return 0.0
         return sum(r.keyword_coverage for r in self.results) / len(self.results)
 
     @property
     def mean_groundedness(self) -> float:
+        if not self.results:
+            return 0.0
         return sum(r.groundedness for r in self.results) / len(self.results)
 
     def passes(self) -> bool:
@@ -73,29 +81,49 @@ class SuiteSummary:
 
 
 def evaluate_item(item: dict[str, object]) -> ItemResult:
-    """Run one golden item through search → rerank → metric checks. Pure."""
-    item_id = str(item["id"])
-    query = str(item["query"])
+    """Run one golden item through search → rerank → metric checks.
+
+    Deterministic and hermetic (in-memory fake only), not pure: it builds
+    a seeded InMemoryRetrieval per item.
+    """
+    raw_id = item.get("id")
+    raw_query = item.get("query")
+    raw_content = item.get("relevant_content")
+    raw_title = item.get("relevant_title")
+    raw_answer = item.get("answer")
+    if not all(
+        isinstance(value, str) for value in (raw_id, raw_query, raw_content, raw_title, raw_answer)
+    ):
+        raise ValueError("golden item needs string id/query/relevant_content/relevant_title/answer")
+    item_id = str(raw_id)
+    query = str(raw_query)
+    relevant_content = str(raw_content)
+    relevant_title = str(raw_title)
+    answer = str(raw_answer)
     relevant_id = f"a-{item_id}"
-    distractors = item["distractors"]
+    distractors = item.get("distractors")
     if not isinstance(distractors, list) or len(distractors) != 2:
         raise ValueError(f"golden item {item_id} needs exactly 2 distractors")
     chunks = [
         Chunk(
             id=relevant_id,
-            content=str(item["relevant_content"]),
-            title=str(item["relevant_title"]),
+            content=relevant_content,
+            title=relevant_title,
             embedding=list(RELEVANT_VECTOR),
         )
     ]
     for index, distractor in enumerate(distractors):
         if not isinstance(distractor, dict):
             raise ValueError(f"golden item {item_id} distractor {index} must be an object")
+        raw_dc = distractor.get("content")
+        raw_dt = distractor.get("title")
+        if not isinstance(raw_dc, str) or not isinstance(raw_dt, str):
+            raise ValueError(f"golden item {item_id} distractor {index} needs string content/title")
         chunks.append(
             Chunk(
                 id=f"{'m' if index == 0 else 'z'}-{item_id}",
-                content=str(distractor["content"]),
-                title=str(distractor["title"]),
+                content=raw_dc,
+                title=raw_dt,
                 embedding=list(DISTRACTOR_VECTORS[index]),
             )
         )
@@ -104,8 +132,7 @@ def evaluate_item(item: dict[str, object]) -> ItemResult:
     ranked_ids = [result.chunk.id or "" for result in results]
     reranked = rerank_candidates(query, results, 1)
     top1 = reranked[0].chunk.id or "" if reranked else ""
-    answer = str(item["answer"])
-    raw_keywords = item["expected_keywords"]
+    raw_keywords = item.get("expected_keywords")
     if not isinstance(raw_keywords, list):
         raise ValueError(f"golden item {item_id} needs an expected_keywords list")
     keywords = [str(keyword) for keyword in raw_keywords]
@@ -115,7 +142,7 @@ def evaluate_item(item: dict[str, object]) -> ItemResult:
         reciprocal_rank=reciprocal_rank(ranked_ids, relevant_id),
         rerank_top1=top1 == relevant_id,
         keyword_coverage=keyword_coverage(answer, keywords),
-        groundedness=groundedness(answer, [str(item["relevant_content"])]),
+        groundedness=groundedness(answer, [relevant_content]),
     )
 
 

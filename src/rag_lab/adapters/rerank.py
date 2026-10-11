@@ -5,8 +5,9 @@ one-vs-two rule); the RerankPort arrives with the second algorithm
 (cross-encoder), already recorded as the upgrade path in ADR-0014.
 """
 
-from rag_lab.adapters.retrieval import tokenize
+from rag_lab.adapters.retrieval import validate_limit
 from rag_lab.core.models import RetrievalResult
+from rag_lab.core.text import tokenize
 
 _OVERLAP_WEIGHT = 1.0
 _PHRASE_BONUS = 0.3
@@ -17,8 +18,7 @@ def rerank_candidates(
     query: str, candidates: list[RetrievalResult], limit: int
 ) -> list[RetrievalResult]:
     """Reorder fused candidates best-first, truncated to limit. No IO."""
-    if limit <= 0:
-        raise ValueError("limit must be positive")
+    validate_limit(limit)
     query_tokens = set(tokenize(query))
     phrase = query.strip().lower()
 

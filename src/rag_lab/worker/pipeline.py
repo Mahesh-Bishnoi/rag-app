@@ -1,10 +1,8 @@
 """Async ingest pipeline. The API initiates/uploads; this module drains them.
 
-Stage flow lives in the LangGraph ingest graph (graph/ingest.py):
-process_one claims one uploaded document and runs it through the graph,
-drain repeats until the queue is idle. Failure codes are unchanged
-(blob_missing, type_mismatch, decode_failed, empty_content, embed_failed,
-persist_failed).
+Stage flow and failure codes live in the LangGraph ingest graph
+(graph/ingest.py), which is canonical: process_one is an explicit alias for
+run_ingest_one kept for the worker-layer name, drain repeats until idle.
 """
 
 from rag_lab.adapters.documents import DocumentStorePort
@@ -20,7 +18,7 @@ def process_one(
     embedder: EmbeddingPort,
     loaders: list[LoaderPort],
 ) -> str | None:
-    """Claim and ingest one uploaded document. Returns its id, or None if idle."""
+    """Alias for run_ingest_one: claim and ingest one document, None if idle."""
     return run_ingest_one(doc_store, storage, embedder, loaders)
 
 

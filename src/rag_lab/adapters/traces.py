@@ -8,7 +8,7 @@ fake for hermetic tests.
 
 import logging
 import uuid
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from sqlalchemy import Engine
 from sqlmodel import Session, SQLModel, select
@@ -19,6 +19,7 @@ from rag_lab.core.models import Chunk, Citation, QaTrace, RetrievalResult, Trace
 logger = logging.getLogger(__name__)
 
 
+@runtime_checkable
 class TraceStorePort(Protocol):
     def save(self, trace: Trace, answer: str, citations: list[Citation]) -> None: ...
     def get(self, trace_id: str) -> QaTrace | None: ...

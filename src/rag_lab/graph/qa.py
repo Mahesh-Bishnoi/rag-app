@@ -76,7 +76,7 @@ def build_qa_graph(
         try:
             answer = complete(llm, prompt).answer
         except Exception as e:
-            raise QaGenerationError(f"generate failed for query {state['query']!r}") from e
+            raise QaGenerationError("qa generate failed") from e
         return {"prompt": prompt, "answer": answer}
 
     graph = StateGraph(QaState)
@@ -101,7 +101,12 @@ def run_qa(
     retrieval_candidates: int,
     answer_context_chunks: int,
 ) -> QaOutcome:
-    """Run one question through the QA graph. Raises on embed/retrieve/LLM failure."""
+    """Run one question through the QA graph.
+
+    Raises QaGenerationError on LLM failure; embed/retrieve errors propagate
+    from their ports unchanged. The API maps generation errors separately
+    from retrieval errors, so the asymmetry is intentional.
+    """
     raw = build_qa_graph(
         embedder, retriever, llm, retrieval_candidates, answer_context_chunks
     ).invoke({"query": query})

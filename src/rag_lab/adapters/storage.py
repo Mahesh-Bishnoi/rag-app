@@ -4,7 +4,7 @@ import logging
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from azure.core.exceptions import AzureError, ResourceExistsError, ResourceNotFoundError
 
@@ -42,6 +42,7 @@ class _StoredBlob:
     content_type: str
 
 
+@runtime_checkable
 class StoragePort(Protocol):
     def put(self, name: str, data: bytes, content_type: str) -> str: ...
     def ping(self) -> bool: ...
@@ -51,6 +52,7 @@ class StoragePort(Protocol):
     ) -> tuple[str, int]: ...
     def stat(self, name: str) -> BlobStat | None: ...
     def download(self, name: str) -> bytes | None: ...
+    def ensure_cors(self, origins: list[str]) -> bool: ...
 
 
 class InMemoryStorage:
@@ -86,6 +88,11 @@ class InMemoryStorage:
         stored = self.blobs.get(name)
         return stored.data if stored is not None else None
 
+    def ensure_cors(self, origins: list[str]) -> bool:
+        """In-memory fake has no CORS surface; always reports not-applied."""
+        del origins
+        return False
+
 
 def _parse_connection_string(connection_string: str) -> tuple[str, str]:
     parts = dict(part.split("=", 1) for part in connection_string.split(";") if "=" in part)
@@ -105,7 +112,7 @@ def desired_cors_rule(origins: list[str]) -> "CorsRule":
     )
 
 
-def _csv(value: str | list[str]) -> list[str]:
+def _split_csv_or_list(value: str | list[str]) -> list[str]:
     """SDK quirk: CorsRule fields come back comma-joined; accept both forms."""
     if isinstance(value, str):
         return [part for part in value.split(",") if part]
@@ -114,9 +121,9 @@ def _csv(value: str | list[str]) -> list[str]:
 
 def cors_rule_matches(rule: "CorsRule", origins: list[str]) -> bool:
     """True when a stored rule already grants the UI origins what they need."""
-    methods = _csv(rule.allowed_methods)
+    methods = _split_csv_or_list(rule.allowed_methods)
     return (
-        sorted(_csv(rule.allowed_origins)) == sorted(origins)
+        sorted(_split_csv_or_list(rule.allowed_origins)) == sorted(origins)
         and all(method in methods for method in BLOB_CORS_METHODS)
         and rule.max_age_in_seconds == BLOB_CORS_MAX_AGE_SECONDS
     )

@@ -10,7 +10,7 @@ the seam: Postgres for prod, in-memory fake for hermetic tests.
 
 import logging
 import uuid
-from typing import Protocol, cast
+from typing import Protocol, cast, runtime_checkable
 
 from sqlalchemy import Engine, func
 from sqlmodel import Session, SQLModel, select
@@ -27,6 +27,7 @@ from rag_lab.core.models import (
 logger = logging.getLogger(__name__)
 
 
+@runtime_checkable
 class DocumentStorePort(Protocol):
     def initiate(self, document: Document) -> str: ...
     def get_document(self, document_id: str) -> Document | None: ...

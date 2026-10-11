@@ -2,7 +2,7 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 DocumentStatus = Literal["initiated", "uploaded", "chunking", "embedding", "finished", "failed"]
 
@@ -31,6 +31,14 @@ class DocumentStatusView(BaseModel):
     status: DocumentStatus
     chunk_count: int = Field(ge=0)
     error_code: IngestErrorCode | None = None
+
+    @model_validator(mode="after")
+    def _check_status_error_pair(self) -> "DocumentStatusView":
+        if self.status == "failed" and self.error_code is None:
+            raise ValueError("failed status requires an error_code")
+        if self.status != "failed" and self.error_code is not None:
+            raise ValueError("only failed status may carry an error_code")
+        return self
 
 
 class Chunk(BaseModel):
