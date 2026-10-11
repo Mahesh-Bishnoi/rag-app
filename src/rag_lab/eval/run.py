@@ -95,9 +95,7 @@ class SuiteSummary:
 def _require_text(item: dict[str, object], key: str) -> str:
     value = item.get(key)
     if not isinstance(value, str):
-        raise ValueError(
-            "golden item needs string id/query/relevant_content/relevant_title/answer"
-        )
+        raise ValueError("golden item needs string id/query/relevant_content/relevant_title/answer")
     return value
 
 
@@ -119,9 +117,7 @@ def _parse_eval_item(
         if not isinstance(distractor.get("content"), str) or not isinstance(
             distractor.get("title"), str
         ):
-            raise ValueError(
-                f"golden item {item_id} distractor {index} needs string content/title"
-            )
+            raise ValueError(f"golden item {item_id} distractor {index} needs string content/title")
     raw_keywords = item.get("expected_keywords")
     if not isinstance(raw_keywords, list):
         raise ValueError(f"golden item {item_id} needs an expected_keywords list")

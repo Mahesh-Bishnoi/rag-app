@@ -3,11 +3,10 @@
 Postgres is the prod adapter (pgvector `<=>` + `ts_rank`, HNSW index from
 migration 0002); InMemoryRetrieval is the hermetic fake. Both return
 RetrievalResults ordered best-first with 1-based fused_rank.
+See docs/architecture.md for the QA flow; scoring math lives in core/scoring.py.
 """
 
-import math
 import uuid
-from collections import Counter
 from typing import Protocol, runtime_checkable
 
 from sqlalchemy import Engine, text
@@ -15,67 +14,8 @@ from sqlmodel import Session, SQLModel, select
 
 from rag_lab.adapters.tables import ChunkRow
 from rag_lab.core.models import Chunk, RetrievalResult
+from rag_lab.core.scoring import bm25_scores, cosine, rrf_fuse, validate_limit
 from rag_lab.core.text import tokenize
-
-RRF_K = 60
-
-
-def validate_limit(limit: int) -> None:
-    """Shared guard: search and rerank limits must be positive."""
-    if limit <= 0:
-        raise ValueError("limit must be positive")
-
-
-def cosine(left: list[float], right: list[float]) -> float:
-    """Cosine similarity in [0, 1] for non-negative embeddings. Loud on dim drift."""
-    if len(left) != len(right):
-        raise ValueError(f"vector dim mismatch {len(left)} != {len(right)}")
-    if not left:
-        return 0.0
-    dot = sum(a * b for a, b in zip(left, right, strict=True))
-    left_norm = math.sqrt(sum(a * a for a in left))
-    right_norm = math.sqrt(sum(b * b for b in right))
-    if left_norm == 0.0 or right_norm == 0.0:
-        return 0.0
-    return dot / (left_norm * right_norm)
-
-
-def bm25_scores(query: list[str], docs: list[list[str]]) -> list[float]:
-    """Plain BM25 (k1=1.2, b=0.75) for the in-memory fake. Pure."""
-    if not docs:
-        return []
-    doc_count = len(docs)
-    doc_freq = Counter(term for doc in docs for term in set(doc))
-    avg_len = sum(len(doc) for doc in docs) / doc_count
-    scores: list[float] = []
-    for doc in docs:
-        term_freq = Counter(doc)
-        doc_len = len(doc)
-        total = 0.0
-        for term in query:
-            count = term_freq.get(term, 0)
-            if count == 0:
-                continue
-            idf = math.log(1.0 + (doc_count - doc_freq[term] + 0.5) / (doc_freq[term] + 0.5))
-            norm = 1.2 * (1.0 - 0.75 + 0.75 * (doc_len / avg_len if avg_len else 1.0))
-            total += idf * (count * 2.2) / (count + norm)
-        scores.append(total)
-    return scores
-
-
-def rrf_fuse(ranked: list[list[str]], limit: int) -> list[tuple[str, int]]:
-    """Fuse ranked id lists with reciprocal-rank fusion.
-
-    Returns (chunk_id, 1-based fused rank) best-first; ties break on id so
-    fusion is deterministic.
-    """
-    validate_limit(limit)
-    fused: dict[str, float] = {}
-    for ids in ranked:
-        for rank, chunk_id in enumerate(ids, start=1):
-            fused[chunk_id] = fused.get(chunk_id, 0.0) + 1.0 / (RRF_K + rank)
-    ordered = sorted(fused.items(), key=lambda item: (-item[1], item[0]))
-    return [(chunk_id, rank) for rank, (chunk_id, _) in enumerate(ordered[:limit], start=1)]
 
 
 @runtime_checkable
@@ -103,17 +43,17 @@ class InMemoryRetrieval:
         ids = [chunk.id or f"mem-{index}" for index, chunk in enumerate(self._chunks)]
         dim = len(query_embedding)
         vector_scores = [
-            cosine(query_embedding, _zero_fill_missing_embedding(chunk.embedding, dim))
+            cosine(query_embedding, embedding_or_zeros(chunk.embedding, dim))
             for chunk in self._chunks
         ]
         keyword_scores = bm25_scores(
             tokenize(query_text), [tokenize(chunk.content) for chunk in self._chunks]
         )
-        return _assemble(
+        return build_results_from_fusion(
             chunks=self._chunks,
             ids=ids,
-            vector_ranked=_ranked_ids(ids, vector_scores),
-            keyword_ranked=_ranked_ids(ids, keyword_scores),
+            vector_ranked=rank_ids_by_score(ids, vector_scores),
+            keyword_ranked=rank_ids_by_score(ids, keyword_scores),
             vector_scores=dict(zip(ids, vector_scores, strict=True)),
             keyword_scores=dict(zip(ids, keyword_scores, strict=True)),
             limit=limit,
@@ -212,11 +152,11 @@ class PostgresRetrieval:
         return results
 
 
-def _zero_fill_missing_embedding(embedding: list[float] | None, dim: int) -> list[float]:
+def embedding_or_zeros(embedding: list[float] | None, dim: int) -> list[float]:
     return embedding if embedding is not None else [0.0] * dim
 
 
-def _ranked_ids(ids: list[str], scores: list[float]) -> list[str]:
+def rank_ids_by_score(ids: list[str], scores: list[float]) -> list[str]:
     return [
         chunk_id
         for chunk_id, _ in sorted(
@@ -225,7 +165,7 @@ def _ranked_ids(ids: list[str], scores: list[float]) -> list[str]:
     ]
 
 
-def _assemble(
+def build_results_from_fusion(
     *,
     chunks: list[Chunk],
     ids: list[str],

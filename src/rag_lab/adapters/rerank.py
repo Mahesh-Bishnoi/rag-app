@@ -5,8 +5,8 @@ one-vs-two rule); the RerankPort arrives with the second algorithm
 (cross-encoder), already recorded as the upgrade path in ADR-0014.
 """
 
-from rag_lab.adapters.retrieval import validate_limit
 from rag_lab.core.models import RetrievalResult
+from rag_lab.core.scoring import validate_limit
 from rag_lab.core.text import tokenize
 
 _OVERLAP_WEIGHT = 1.0

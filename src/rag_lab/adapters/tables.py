@@ -1,6 +1,6 @@
 """SQLModel table rows. Storage schema only.
 
-API and stage-boundary DTOs stay Pydantic in core/models.py and api/main.py:
+API and stage-boundary DTOs stay Pydantic in core/models.py and api/schemas.py:
 table rows are never returned from endpoints, and DTOs are never persisted.
 The two shapes evolve for different reasons (migration safety vs API
 stability), so they are not shared, subclassed, or converted implicitly.

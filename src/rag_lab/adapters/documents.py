@@ -1,11 +1,7 @@
-"""Document persistence behind a port.
+"""Document persistence behind a port. API initiates/uploads; worker advances to finished.
 
-Async ingest (ADR-0013): the API initiates documents and flips them to
-uploaded on complete; the worker claims uploaded rows and advances
-chunking → embedding → finished/failed, writing chunks in the same
-transaction as the finished flip. Table rows never leave: callers pass
-Pydantic DTOs in, get ids and status views back. Two adapters justify
-the seam: Postgres for prod, in-memory fake for hermetic tests.
+Table rows never leave: callers pass Pydantic DTOs in, get ids and status views back.
+Postgres for prod, in-memory fake for hermetic tests. See docs/architecture.md.
 """
 
 import logging
@@ -114,7 +110,7 @@ class InMemoryDocumentStore:
         )
 
 
-def _view(
+def row_to_status_view(
     doc_id: uuid.UUID, status: str, error_code: str | None, chunk_count: int
 ) -> DocumentStatusView:
     # Narrow at the persistence boundary: the CHECK constraint limits these
@@ -127,7 +123,7 @@ def _view(
     )
 
 
-def _as_uuid(document_id: str) -> uuid.UUID | None:
+def parse_document_uuid(document_id: str) -> uuid.UUID | None:
     try:
         return uuid.UUID(document_id)
     except ValueError:
@@ -156,7 +152,7 @@ class PostgresDocumentStore:
             return str(row.id)
 
     def get_document(self, document_id: str) -> Document | None:
-        key = _as_uuid(document_id)
+        key = parse_document_uuid(document_id)
         if key is None:
             return None
         with Session(self._engine) as session:
@@ -172,7 +168,7 @@ class PostgresDocumentStore:
             )
 
     def mark_uploaded(self, document_id: str) -> DocumentStatusView | None:
-        key = _as_uuid(document_id)
+        key = parse_document_uuid(document_id)
         if key is None:
             return None
         with Session(self._engine) as session:
@@ -184,10 +180,12 @@ class PostgresDocumentStore:
                 session.add(row)
                 session.commit()
                 session.refresh(row)
-            return _view(row.id, row.status, row.error_code, self._chunk_count(session, key))
+            return row_to_status_view(
+                row.id, row.status, row.error_code, self._chunk_count(session, key)
+            )
 
     def fail(self, document_id: str, error_code: IngestErrorCode) -> DocumentStatusView | None:
-        key = _as_uuid(document_id)
+        key = parse_document_uuid(document_id)
         if key is None:
             return None
         with Session(self._engine) as session:
@@ -199,7 +197,9 @@ class PostgresDocumentStore:
             session.add(row)
             session.commit()
             session.refresh(row)
-            return _view(row.id, row.status, row.error_code, self._chunk_count(session, key))
+            return row_to_status_view(
+                row.id, row.status, row.error_code, self._chunk_count(session, key)
+            )
 
     def claim_next(self) -> Document | None:
         with Session(self._engine) as session:
@@ -224,7 +224,7 @@ class PostgresDocumentStore:
             )
 
     def mark_embedding(self, document_id: str) -> None:
-        key = _as_uuid(document_id)
+        key = parse_document_uuid(document_id)
         if key is None:
             return
         with Session(self._engine) as session:
@@ -238,7 +238,7 @@ class PostgresDocumentStore:
     def finish(self, document_id: str, chunks: list[Chunk]) -> None:
         if not chunks:
             raise ValueError("chunks must not be empty")
-        key = _as_uuid(document_id)
+        key = parse_document_uuid(document_id)
         if key is None:
             raise ValueError(f"unknown document {document_id}")
         with Session(self._engine) as session:
@@ -265,14 +265,16 @@ class PostgresDocumentStore:
             logger.debug("finished document %s with %d chunks", key, len(chunks))
 
     def get_status(self, document_id: str) -> DocumentStatusView | None:
-        key = _as_uuid(document_id)
+        key = parse_document_uuid(document_id)
         if key is None:
             return None
         with Session(self._engine) as session:
             row = session.get(DocumentRow, key)
             if row is None or row.id is None:
                 return None
-            return _view(row.id, row.status, row.error_code, self._chunk_count(session, key))
+            return row_to_status_view(
+                row.id, row.status, row.error_code, self._chunk_count(session, key)
+            )
 
     @staticmethod
     def _chunk_count(session: Session, key: uuid.UUID) -> int:

@@ -47,11 +47,13 @@ Default LLM transport points at Ollama (`http://localhost:11434/v1`); swap `OPEN
 
 ## Layout
 
-- `src/rag_lab/core/` — `Settings`, Pydantic schemas (`Document`, `Chunk`, `RetrievalResult`, `AnswerWithCitations`, `Trace`)
-- `src/rag_lab/api/` — `main` (routes + wiring), `ui` + `static/index.html` (minimal drag-drop UI at `GET /`)
-- `src/rag_lab/adapters/` — `OpenAICompatibleLlm` (chat + `StubLlm` fake), `generation` (PydanticAI `GroundedAnswer` over `LlmPort` via `FunctionModel`), `EmbeddingPort` (OpenAI-compatible + stub fake), `StoragePort` (signed-URL issue + stat/download, Azurite + in-memory fake; `blob_name` key parsing), `DocumentStorePort` (async lifecycle: initiate → uploaded → chunking → embedding → finished/failed; Postgres + in-memory fake), `RetrievalPort` (hybrid vector + `ts_rank` with RRF; Postgres + in-memory fake), `rerank_candidates` (heuristic overlap + phrase bonus), `db_ping`
-- `src/rag_lab/ingest/` — `LoaderPort`, `TextLoader`, `PdfLoader`, `split_chunks` (heading-aware sections, LangChain `RecursiveCharacterTextSplitter` windows)
-- `src/rag_lab/graph/` — `qa` (LangGraph embed → retrieve → rerank → generate, `QaGenerationError` on LLM failure), `ingest` (LangGraph download → load → split → embed → finish, typed `_IngestFailure` → `fail` codes)
-- `src/rag_lab/worker/` — `pipeline.drain/process_one` (claim via `run_ingest_one` until idle), `run` entrypoint (`python -m rag_lab.worker.run`)
-- `src/rag_lab/eval/` — heuristic RAGAS-style harness (`metrics`: hit@k/recall/MRR, keyword coverage, groundedness; `run`: `uv run python -m rag_lab.eval.run` over `eval/golden.jsonl`, 12 seed items, exits non-zero below thresholds)
+Start with `docs/architecture.md` for the request journeys, then:
+
+- `src/rag_lab/core/` — pure domain: `models` (DTOs), `config` (`Settings`), `text` + `scoring` (tokenize, cosine, BM25, RRF — no IO)
+- `src/rag_lab/api/` — HTTP only: `schemas` (wire DTOs), `deps` (port resolution), `main` (routes + `create_app`), `ui` + `static/index.html` (`GET /`)
+- `src/rag_lab/adapters/` — ports with prod + in-memory fake each: `llm_openai`, `generation`, `embeddings`, `storage`, `documents`, `retrieval`, `rerank_candidates`, `db_ping`, `traces`
+- `src/rag_lab/ingest/` — `LoaderPort`, `TextLoader`, `PdfLoader`, `split_chunks` (heading-aware sections)
+- `src/rag_lab/graph/` — pipeline order: `qa` (embed → retrieve → rerank → generate), `ingest` (download → load → split → embed → finish)
+- `src/rag_lab/worker/` — `pipeline.drain/process_one` over `run_ingest_one`, `run` entrypoint
+- `src/rag_lab/eval/` — heuristic RAGAS-style harness over `eval/golden.jsonl`
 - `compose.yaml` — `db` (pgvector:pg16, :5432), `azurite` (:10000-10002), `worker` (ingest poll loop)

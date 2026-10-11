@@ -12,13 +12,11 @@ from rag_lab.adapters.rerank import rerank_candidates
 from rag_lab.adapters.retrieval import (
     InMemoryRetrieval,
     PostgresRetrieval,
-    bm25_scores,
-    cosine,
-    rrf_fuse,
 )
 from rag_lab.adapters.tables import ChunkRow, DocumentRow
 from rag_lab.core.config import Settings
 from rag_lab.core.models import Chunk, Document, RetrievalResult
+from rag_lab.core.scoring import bm25_scores, cosine, rrf_fuse
 from rag_lab.core.text import tokenize
 
 LIVE = os.environ.get("RAGLAB_LIVE_DB") == "1"

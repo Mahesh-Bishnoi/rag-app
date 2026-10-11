@@ -4,26 +4,39 @@ import logging
 import re
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Literal, TypeVar, cast
+from typing import cast
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
 
-from rag_lab.adapters.db import db_ping, get_engine
-from rag_lab.adapters.documents import DocumentStorePort, PostgresDocumentStore
-from rag_lab.adapters.embeddings import EmbeddingPort, OpenAICompatibleEmbedding
-from rag_lab.adapters.llm_openai import LlmPort, OpenAICompatibleLlm
-from rag_lab.adapters.retrieval import PostgresRetrieval, RetrievalPort
-from rag_lab.adapters.storage import (
-    AzuriteBlobStorage,
-    BlobStat,
-    InMemoryStorage,
-    StoragePort,
-    blob_name,
+from rag_lab.adapters.db import db_ping
+from rag_lab.adapters.documents import DocumentStorePort
+from rag_lab.adapters.embeddings import EmbeddingPort
+from rag_lab.adapters.llm_openai import LlmPort
+from rag_lab.adapters.retrieval import RetrievalPort
+from rag_lab.adapters.storage import BlobStat, StoragePort, blob_name
+from rag_lab.adapters.traces import TraceStorePort
+from rag_lab.api.deps import (
+    ensure_emulator_cors,
+    resolve_doc_store,
+    resolve_embedder,
+    resolve_llm,
+    resolve_retriever,
+    resolve_storage,
+    resolve_trace_store,
 )
-from rag_lab.adapters.traces import PostgresTraceStore, TraceStorePort
+from rag_lab.api.schemas import (
+    ChatCompletionChoice,
+    ChatCompletionRequest,
+    ChatCompletionResponse,
+    ChatMessage,
+    HealthResponse,
+    InitiateUploadRequest,
+    InitiateUploadResponse,
+    ModelEntry,
+    ModelsResponse,
+)
 from rag_lab.api.ui import register_ui
 from rag_lab.core.config import Settings
 from rag_lab.core.models import (
@@ -40,67 +53,6 @@ from rag_lab.graph.qa import QaGenerationError, QaOutcome, run_qa
 logger = logging.getLogger(__name__)
 SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]")
 ALLOWED_CONTENT_TYPES = {"text/plain", "text/markdown", "application/pdf"}
-
-
-class ChatMessage(BaseModel):
-    role: Literal["system", "user", "assistant"]
-    content: str
-
-
-class ChatCompletionRequest(BaseModel):
-    model: str
-    messages: list[ChatMessage] = Field(min_length=1, max_length=100)
-
-
-class ChatCompletionChoice(BaseModel):
-    index: int
-    message: ChatMessage
-    finish_reason: str
-
-
-class ChatCompletionResponse(BaseModel):
-    id: str
-    object: str
-    created: int
-    model: str
-    choices: list[ChatCompletionChoice]
-    citations: list[Citation] = Field(default_factory=list)
-
-
-class HealthResponse(BaseModel):
-    status: str
-    db: bool
-    blob: bool
-
-
-class ModelEntry(BaseModel):
-    id: str
-    object: str
-
-
-class ModelsResponse(BaseModel):
-    object: str
-    data: list[ModelEntry]
-
-
-class InitiateUploadRequest(BaseModel):
-    filename: str = Field(min_length=1, max_length=512)
-    content_type: str = Field(min_length=1, max_length=128)
-    size_bytes: int = Field(gt=0)
-
-
-class InitiateUploadResponse(BaseModel):
-    document_id: str
-    upload_url: str
-    expires_in: int
-
-
-T = TypeVar("T")
-
-
-def _port_of(stored: T | None, factory: Callable[[], T]) -> T:
-    """Test double when injected, otherwise the prod default. One owner for the pattern."""
-    return stored if stored is not None else factory()
 
 
 def _verify_blob(meta: BlobStat, declared_mime: str, max_bytes: int) -> IngestErrorCode | None:
@@ -162,7 +114,7 @@ def _initiate_upload(
     )
 
 
-def _mark_failed_or_404(
+def fail_document_or_404(
     doc_store: DocumentStorePort, document_id: str, error_code: IngestErrorCode
 ) -> DocumentStatusView:
     """Record a typed ingest failure, or 404 when the document is unknown."""
@@ -206,10 +158,10 @@ def _complete_upload(
         logger.exception("blob stat failed for %s", document_id)
         raise HTTPException(status_code=500, detail="ingest failed") from None
     if meta is None:
-        return _mark_failed_or_404(doc_store, document_id, "upload_incomplete")
+        return fail_document_or_404(doc_store, document_id, "upload_incomplete")
     code = _verify_blob(meta, doc.mime, max_upload_bytes)
     if code is not None:
-        return _mark_failed_or_404(doc_store, document_id, code)
+        return fail_document_or_404(doc_store, document_id, code)
     uploaded = doc_store.mark_uploaded(document_id)
     if uploaded is None:
         raise HTTPException(status_code=404, detail="unknown document")
@@ -316,76 +268,11 @@ def _answer_question(
     return _build_chat_response(trace_id, model, outcome["answer"], citations)
 
 
-def _storage_of(app: FastAPI, resolved: Settings) -> StoragePort:
-    def _default() -> StoragePort:
-        if resolved.azurite_connection_string:
-            return AzuriteBlobStorage(
-                resolved.azurite_connection_string, resolved.blob_container
-            )
-        return InMemoryStorage()
-
-    return _port_of(cast(StoragePort | None, app.state.storage), _default)
-
-
-def _ensure_emulator_cors(store: StoragePort, origins: list[str]) -> None:
-    """Write dev CORS rules at startup; fail open so the API still serves."""
-    try:
-        store.ensure_cors(origins)
-    except Exception:
-        logger.exception("blob CORS ensure failed")
-
-
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     resolved = cast(Settings, app.state.settings)
-    _ensure_emulator_cors(_storage_of(app, resolved), resolved.blob_cors_origins)
+    ensure_emulator_cors(resolve_storage(app, resolved), resolved.blob_cors_origins)
     yield
-
-
-def _doc_store_of(app: FastAPI, resolved: Settings) -> DocumentStorePort:
-    return _port_of(
-        cast(DocumentStorePort | None, app.state.doc_store),
-        lambda: PostgresDocumentStore(get_engine(resolved.database_url)),
-    )
-
-
-def _embedder_of(app: FastAPI, resolved: Settings) -> EmbeddingPort:
-    return _port_of(
-        cast(EmbeddingPort | None, app.state.embedder),
-        lambda: OpenAICompatibleEmbedding(
-            base_url=resolved.embedding_base_url,
-            api_key=resolved.embedding_api_key,
-            model=resolved.embedding_model,
-        ),
-    )
-
-
-def _retriever_of(app: FastAPI, resolved: Settings) -> RetrievalPort:
-    return _port_of(
-        cast(RetrievalPort | None, app.state.retriever),
-        lambda: PostgresRetrieval(
-            get_engine(resolved.database_url),
-            expected_dim=resolved.embedding_dimensions,
-        ),
-    )
-
-
-def _llm_of(app: FastAPI, resolved: Settings) -> LlmPort:
-    return _port_of(
-        cast(LlmPort | None, app.state.llm),
-        lambda: OpenAICompatibleLlm(
-            base_url=resolved.openai_base_url,
-            api_key=resolved.openai_api_key,
-            model=resolved.openai_model,
-        ),
-    )
-
-
-def _trace_store_of(app: FastAPI, resolved: Settings) -> TraceStorePort:
-    return _port_of(
-        cast(TraceStorePort | None, app.state.trace_store),
-        lambda: PostgresTraceStore(get_engine(resolved.database_url)),
-    )
 
 
 def _get_trace_record(trace_store: TraceStorePort, trace_id: str) -> QaTrace:
@@ -417,7 +304,7 @@ def create_app(
 
     @app.get("/health")
     def health() -> HealthResponse:
-        store = _storage_of(app, resolved)
+        store = resolve_storage(app, resolved)
         return HealthResponse(
             status="ok",
             db=db_ping(resolved.database_url),
@@ -442,25 +329,25 @@ def create_app(
         return _answer_question(
             query,
             body.model,
-            embedder=_embedder_of(app, resolved),
-            retriever=_retriever_of(app, resolved),
-            llm=_llm_of(app, resolved),
-            trace_store=_trace_store_of(app, resolved),
+            embedder=resolve_embedder(app, resolved),
+            retriever=resolve_retriever(app, resolved),
+            llm=resolve_llm(app, resolved),
+            trace_store=resolve_trace_store(app, resolved),
             retrieval_candidates=resolved.retrieval_candidates,
             answer_context_chunks=resolved.answer_context_chunks,
         )
 
     @app.get("/v1/traces/{trace_id}")
     def get_trace(trace_id: str) -> QaTrace:
-        return _get_trace_record(_trace_store_of(app, resolved), trace_id)
+        return _get_trace_record(resolve_trace_store(app, resolved), trace_id)
 
     @app.post("/v1/kb/uploads/initiate")
     def initiate_upload(body: InitiateUploadRequest) -> InitiateUploadResponse:
         return _initiate_upload(
             body,
             max_upload_bytes=resolved.max_upload_bytes,
-            storage=_storage_of(app, resolved),
-            doc_store=_doc_store_of(app, resolved),
+            storage=resolve_storage(app, resolved),
+            doc_store=resolve_doc_store(app, resolved),
         )
 
     @app.post("/v1/kb/uploads/{document_id}/complete")
@@ -468,13 +355,13 @@ def create_app(
         return _complete_upload(
             document_id,
             max_upload_bytes=resolved.max_upload_bytes,
-            storage=_storage_of(app, resolved),
-            doc_store=_doc_store_of(app, resolved),
+            storage=resolve_storage(app, resolved),
+            doc_store=resolve_doc_store(app, resolved),
         )
 
     @app.get("/v1/kb/documents/{document_id}")
     def get_document(document_id: str) -> DocumentStatusView:
-        view = _doc_store_of(app, resolved).get_status(document_id)
+        view = resolve_doc_store(app, resolved).get_status(document_id)
         if view is None:
             raise HTTPException(status_code=404, detail="unknown document")
         return view
