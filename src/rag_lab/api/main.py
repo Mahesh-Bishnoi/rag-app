@@ -4,6 +4,8 @@ import logging
 import re
 import time
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import cast
 
 from fastapi import FastAPI, HTTPException
@@ -22,6 +24,7 @@ from rag_lab.adapters.storage import (
     blob_name,
 )
 from rag_lab.adapters.traces import PostgresTraceStore, TraceStorePort
+from rag_lab.api.ui import register_ui
 from rag_lab.core.config import Settings
 from rag_lab.core.models import (
     Citation,
@@ -324,6 +327,23 @@ def _storage_of(app: FastAPI, resolved: Settings) -> StoragePort:
     return _build_storage(resolved, cast("StoragePort | None", app.state.storage))
 
 
+def _ensure_emulator_cors(store: StoragePort, origins: list[str]) -> None:
+    """Write dev CORS rules at startup; fail open so the API still serves."""
+    if not isinstance(store, AzuriteBlobStorage):
+        return
+    try:
+        store.ensure_cors(origins)
+    except Exception:
+        logger.exception("blob CORS ensure failed")
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    resolved = cast("Settings", app.state.settings)
+    _ensure_emulator_cors(_storage_of(app, resolved), resolved.blob_cors_origins)
+    yield
+
+
 def _doc_store_of(app: FastAPI, resolved: Settings) -> DocumentStorePort:
     return _default_doc_store(resolved, cast("DocumentStorePort | None", app.state.doc_store))
 
@@ -361,7 +381,7 @@ def create_app(
     trace_store: TraceStorePort | None = None,
 ) -> FastAPI:
     resolved = settings or Settings()
-    app = FastAPI(title="rag-lab", version="0.1.0")
+    app = FastAPI(title="rag-lab", version="0.1.0", lifespan=_lifespan)
     app.state.settings = resolved
     app.state.storage = storage
     app.state.doc_store = doc_store
@@ -369,6 +389,7 @@ def create_app(
     app.state.retriever = retriever
     app.state.llm = llm
     app.state.trace_store = trace_store
+    register_ui(app)
 
     @app.get("/health")
     def health() -> HealthResponse:

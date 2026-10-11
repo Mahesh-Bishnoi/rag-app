@@ -20,6 +20,11 @@ class Settings(BaseSettings):
     # actual dim off the model output and rejects mismatches (ADR-0014).
     embedding_dimensions: int = Field(default=768, gt=0, le=4096)
     max_upload_bytes: int = 20 * 1024 * 1024
+    # Origins the dev-emulator CORS rule grants PUT access (ADR-0017). Only
+    # ever written to devstoreaccount1; real Azure keeps operator-owned CORS.
+    blob_cors_origins: list[str] = Field(
+        default_factory=lambda: ["http://localhost:8000", "http://127.0.0.1:8000"]
+    )
     ingest_poll_seconds: float = 1.0
     retrieval_candidates: int = Field(default=40, gt=0, le=200)
     answer_context_chunks: int = Field(default=5, gt=0, le=20)

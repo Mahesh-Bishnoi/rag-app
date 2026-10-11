@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rag-lab: knowledge base</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; }
+  #kb-drop { border: 2px dashed #888; border-radius: 8px; padding: 2rem; text-align: center; cursor: pointer; }
+  #kb-drop.over { border-color: #222; background: #f4f4f4; }
+  #file-list { list-style: none; padding: 0; }
+  #file-list li { margin: 0.25rem 0; font-size: 0.9rem; }
+  #answer { white-space: pre-wrap; border: 1px solid #ccc; border-radius: 8px; padding: 1rem; min-height: 4rem; }
+  #citations { font-size: 0.9rem; }
+  form { display: flex; gap: 0.5rem; margin: 1rem 0; }
+  input[type="text"] { flex: 1; padding: 0.5rem; }
+</style>
+</head>
+<body>
+<h1>rag-lab</h1>
+<p id="health">health: checking&hellip;</p>
+
+<h2>1. Drop files into the knowledge base</h2>
+<div id="kb-drop" tabindex="0" role="button" aria-label="Drop PDF or text files here, or press Enter to browse">
+  Drop PDF / text files here, or click to browse.
+  <input id="kb-files" type="file" multiple accept=".txt,.md,.pdf,text/plain,text/markdown,application/pdf" hidden>
+</div>
+<ul id="file-list" aria-live="polite"></ul>
+
+<h2>2. Chat over them</h2>
+<form id="chat-form">
+  <input id="chat-input" type="text" placeholder="Ask a question&hellip;" autocomplete="off" required>
+  <button type="submit">Ask</button>
+</form>
+<div id="answer" aria-live="polite"></div>
+<ul id="citations"></ul>
+<p><a id="trace-link" href="#" hidden>trace</a></p>
+
+<script>
+"use strict";
+const MIME_FOR_EXT = { txt: "text/plain", md: "text/markdown", markdown: "text/markdown", pdf: "application/pdf" };
+let chatModel = "";
+
+async function api(path, options) {
+  const response = await fetch(path, options);
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(path + " -> " + response.status + " " + detail.slice(0, 200));
+  }
+  return response.json();
+}
+
+function mimeFor(file) {
+  if (file.type && Object.values(MIME_FOR_EXT).includes(file.type)) return file.type;
+  const ext = (file.name.split(".").pop() || "").toLowerCase();
+  return MIME_FOR_EXT[ext] || "";
+}
+
+function addRow(name) {
+  const li = document.createElement("li");
+  const nameSpan = document.createElement("strong");
+  nameSpan.textContent = name;
+  const statusSpan = document.createElement("span");
+  statusSpan.textContent = ": starting upload";
+  li.append(nameSpan, statusSpan);
+  document.getElementById("file-list").append(li);
+  return statusSpan;
+}
+
+function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
+
+async function waitForIngest(documentId, statusSpan) {
+  for (let i = 0; i < 60; i++) {
+    await sleep(1000);
+    const view = await api("/v1/kb/documents/" + documentId);
+    if (view.status === "finished") {
+      statusSpan.textContent = ": finished (" + view.chunk_count + " chunks)";
+      return;
+    }
+    if (view.status === "failed") {
+      statusSpan.textContent = ": failed (" + (view.error_code || "unknown") + ")";
+      return;
+    }
+    statusSpan.textContent = ": " + view.status + "...";
+  }
+  statusSpan.textContent = ": still processing (timed out waiting)";
+}
+
+async function uploadOne(file) {
+  const statusSpan = addRow(file.name);
+  const mime = mimeFor(file);
+  if (!mime) {
+    statusSpan.textContent = ": rejected (only .txt, .md, .pdf)";
+    return;
+  }
+  try {
+    statusSpan.textContent = ": requesting upload URL";
+    const init = await api("/v1/kb/uploads/initiate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename: file.name, content_type: mime, size_bytes: file.size || 1 }),
+    });
+    statusSpan.textContent = ": uploading bytes";
+    const put = await fetch(init.upload_url, {
+      method: "PUT",
+      headers: { "Content-Type": mime, "x-ms-blob-type": "BlockBlob" },
+      body: file,
+    });
+    if (!put.ok) throw new Error("PUT -> " + put.status);
+    statusSpan.textContent = ": uploaded, completing";
+    const done = await api("/v1/kb/uploads/" + init.document_id + "/complete", { method: "POST" });
+    if (done.status === "failed") {
+      statusSpan.textContent = ": failed (" + (done.error_code || "unknown") + ")";
+      return;
+    }
+    statusSpan.textContent = ": uploaded, ingesting...";
+    await waitForIngest(init.document_id, statusSpan);
+  } catch (error) {
+    statusSpan.textContent = ": error (" + error.message + ")";
+  }
+}
+
+async function uploadFiles(files) {
+  for (const file of files) await uploadOne(file);
+}
+
+function renderAnswer(body) {
+  const answer = document.getElementById("answer");
+  answer.textContent = body.choices[0].message.content;
+  const cites = document.getElementById("citations");
+  cites.replaceChildren();
+  for (const cite of body.citations || []) {
+    const li = document.createElement("li");
+    const label = cite.title + (cite.heading_path ? " / " + cite.heading_path : "")
+      + (cite.page ? " (p." + cite.page + ")" : "") + " [" + cite.chunk_id + "]";
+    li.textContent = label;
+    cites.append(li);
+  }
+  const traceId = String(body.id || "").replace(/^chatcmpl-/, "");
+  const link = document.getElementById("trace-link");
+  if (traceId) {
+    link.href = "/v1/traces/" + traceId;
+    link.textContent = "trace " + traceId;
+    link.hidden = false;
+  } else {
+    link.hidden = true;
+  }
+}
+
+async function boot() {
+  const drop = document.getElementById("kb-drop");
+  const picker = document.getElementById("kb-files");
+  drop.addEventListener("click", () => picker.click());
+  drop.addEventListener("keydown", (event) => { if (event.key === "Enter") picker.click(); });
+  for (const eventName of ["dragenter", "dragover"]) {
+    drop.addEventListener(eventName, (event) => { event.preventDefault(); drop.classList.add("over"); });
+  }
+  for (const eventName of ["dragleave", "drop"]) {
+    drop.addEventListener(eventName, (event) => { event.preventDefault(); drop.classList.remove("over"); });
+  }
+  drop.addEventListener("drop", (event) => uploadFiles(event.dataTransfer.files));
+  picker.addEventListener("change", () => { uploadFiles(picker.files); picker.value = ""; });
+
+  try {
+    const health = await api("/health");
+    document.getElementById("health").textContent =
+      "health: " + health.status + " (db=" + health.db + " blob=" + health.blob + ")";
+  } catch (error) {
+    document.getElementById("health").textContent = "health: unreachable (" + error.message + ")";
+  }
+  try {
+    const models = await api("/v1/models");
+    chatModel = models.data[0].id;
+  } catch (error) {
+    document.getElementById("answer").textContent = "models unavailable: " + error.message;
+  }
+
+  document.getElementById("chat-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const input = document.getElementById("chat-input");
+    const query = input.value.trim();
+    if (!query) return;
+    document.getElementById("answer").textContent = "asking...";
+    try {
+      const body = await api("/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: chatModel, messages: [{ role: "user", content: query }] }),
+      });
+      renderAnswer(body);
+    } catch (error) {
+      document.getElementById("answer").textContent = "error: " + error.message;
+    }
+  });
+}
+
+boot();
+</script>
+</body>
+</html>
