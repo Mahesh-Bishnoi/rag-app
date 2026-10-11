@@ -1,0 +1,7 @@
+title = "rag-lab gitleaks config"
+
+[[allowlists]]
+description = "Azurite well-known development key: Microsoft-published, identical on every install, valid only against a localhost emulator. Not a secret; .env.example needs the working value."
+regexes = [
+    '''Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==''',
+]

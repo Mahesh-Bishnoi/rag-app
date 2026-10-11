@@ -20,6 +20,13 @@
   verify latest first — `uv.lock` + digest pins freeze deliberate choices.
 - Bar-height rule: strictest checker settings that stay green. If a gate
   passes trivially (lenient config, no coverage floor), the gate is the bug.
+- Architecture: `lint-imports` (`.importlinter` layers contract) stays kept.
+  Reorder layers rather than loosening when a real need arises.
+- Supply chain: `uv audit` clean before release and on dependency changes;
+  `deptry src alembic` clean (`per_rule_ignores` in pyproject only for
+  used-without-import deps, with reason comments).
+- Secrets: `gitleaks detect --source . --config .gitleaks.toml` clean;
+  allowlist entries only for well-known non-secrets, each with a reason.
 
 ## Decisions (read before designing)
 - Intent: `docs/intent/rag-lab.md` — local RAG lab, PDF+text v1, modular loaders later.

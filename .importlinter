@@ -1,0 +1,11 @@
+[importlinter]
+root_package = rag_lab
+
+[importlinter:1]
+name = Layered architecture (api -> adapters/ingest -> core)
+type = layers
+layers =
+    rag_lab.api
+    rag_lab.adapters
+    rag_lab.ingest
+    rag_lab.core

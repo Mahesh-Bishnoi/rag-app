@@ -10,7 +10,10 @@ Local RAG lab (infra+skeleton v1). See `docs/intent/rag-lab.md` and `docs/decisi
 4. Schema (fresh volume): `uv run alembic upgrade head`
 5. Run API: `uv run uvicorn rag_lab.api.main:app --reload --port 8000`
 6. Checks: `uv run pytest`, `uv run ruff check .`, `uv run ruff format --check .`,
-   `uv run mypy .` (strict)
+   `uv run mypy .` (strict), `PYTHONPATH=src uv run lint-imports`,
+   `uv run deptry src alembic`, `uv audit`
+7. Secrets: `gitleaks detect --source . --config .gitleaks.toml` (clean required;
+   allowlist in `.gitleaks.toml` covers only well-known non-secrets, with reason)
 7. Live tier (needs `podman compose up -d` + `.env`):
    `RAGLAB_LIVE_DB=1 uv run pytest` — migration upgrade/downgrade round-trip
    plus Azurite put round-trip. Focused runs skip the coverage gate with

@@ -15,6 +15,7 @@ dependencies = [
     "python-multipart>=0.0.18",
     "sqlalchemy>=2.1",
     "alembic>=1.20",
+    "azure-core>=1.41.0",
 ]
 
 [dependency-groups]
@@ -25,6 +26,8 @@ dev = [
     "httpx>=0.27",
     "ruff>=0.6",
     "mypy>=1.11",
+    "import-linter>=2.15",
+    "deptry>=0.25.1",
 ]
 
 [build-system]
@@ -48,6 +51,11 @@ select = ["E", "F", "I", "UP", "B", "C4", "SIM", "S", "RUF", "A", "G", "PTH", "R
 python_version = "3.11"
 strict = true
 ignore_missing_imports = false
+
+[tool.deptry.per_rule_ignores]
+# Both are used without being imported: uvicorn runs the server via CLI,
+# python-multipart is exercised implicitly by Starlette form/file parsing.
+DEP002 = ["uvicorn", "python-multipart"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

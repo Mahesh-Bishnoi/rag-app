@@ -9,8 +9,12 @@ from rag_lab.core.config import Settings
 LIVE = os.environ.get("RAGLAB_LIVE_DB") == "1"
 needs_live = pytest.mark.skipif(not LIVE, reason="needs live services (RAGLAB_LIVE_DB=1)")
 
-DEV_ACCOUNT_KEY = (
-    "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="
+# Deliberately fake: this client only ever hits a closed port (connection
+# refused precedes auth), so no credential — real or well-known — belongs here.
+DEAD_PORT_CONNECTION_STRING = (
+    "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;"
+    "AccountKey=aGk=;"
+    "BlobEndpoint=http://127.0.0.1:19999/devstoreaccount1;"
 )
 
 
@@ -35,12 +39,7 @@ def test_in_memory_storage_roundtrip() -> None:
 
 
 def test_azurite_ping_false_on_closed_port() -> None:
-    store = AzuriteBlobStorage(
-        "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;"
-        f"AccountKey={DEV_ACCOUNT_KEY};"
-        "BlobEndpoint=http://127.0.0.1:19999/devstoreaccount1;",
-        "kb-probe",
-    )
+    store = AzuriteBlobStorage(DEAD_PORT_CONNECTION_STRING, "kb-probe")
     assert not store.ping()
 
 

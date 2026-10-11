@@ -85,10 +85,10 @@ def test_health_falls_back_to_memory_without_connection_string() -> None:
 def test_health_reports_blob_false_when_azurite_down() -> None:
     settings = Settings(
         database_url="postgresql://rag:rag@localhost:5432/raglab",
+        # Fake key: the probe hits a closed port, auth never happens.
         azurite_connection_string=(
             "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;"
-            "AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq"
-            "/K1SZFPTOtr/KBHBeksoGMGw==;"
+            "AccountKey=aGk=;"
             "BlobEndpoint=http://127.0.0.1:19999/devstoreaccount1;"
         ),
     )
