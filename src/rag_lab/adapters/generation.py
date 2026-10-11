@@ -1,9 +1,12 @@
 """Typed generation: PydanticAI owns LLM calls, LlmPort stays the transport.
 
-The agent wraps the injected LlmPort via FunctionModel, so the StubLlm fake
-keeps hermetic tests offline while prod runs the same validated path over
-OpenAICompatibleLlm. Output is parsed into GroundedAnswer — an empty answer
-fails validation and surfaces as a generation error (never a silent 200).
+Prompt text lives in rag_lab/prompts/*.prompt (plain text, {query}/{passages}
+slots); this module only renders them and stays the single owner
+(api/worker must not fork prompt text). The agent wraps the injected LlmPort
+via FunctionModel, so the StubLlm fake keeps hermetic tests offline while
+prod runs the same validated path over OpenAICompatibleLlm. Output is parsed
+into GroundedAnswer — an empty answer fails validation and surfaces as a
+generation error (never a silent 200).
 """
 
 import json
@@ -15,6 +18,7 @@ from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from rag_lab.adapters.llm_openai import LlmPort
+from rag_lab.prompts import load_prompt
 
 
 class GroundedAnswer(BaseModel):
@@ -24,24 +28,21 @@ class GroundedAnswer(BaseModel):
 def grounded_prompt(query: str, contexts: list[str]) -> str:
     """Numbered-context prompt; the single owner (api/worker must not fork it)."""
     if not contexts:
-        return (
-            "Answer the question directly. No knowledge-base passages "
-            f"were retrieved.\n\nQuestion: {query}\nAnswer:"
-        )
+        return load_prompt("grounded_no_context.prompt").replace("{query}", query)
     numbered = "\n\n".join(
         f"[{index}] {content}" for index, content in enumerate(contexts, start=1)
     )
     return (
-        "Answer the question using only the passages below. "
-        "Cite the passages you use with their [n] markers.\n\n"
-        f"Passages:\n{numbered}\n\nQuestion: {query}\nAnswer:"
+        load_prompt("grounded_with_context.prompt")
+        .replace("{passages}", numbered)
+        .replace("{query}", query)
     )
 
 
 def prompt_to_messages(prompt: str) -> list[dict[str, str]]:
     """System + user envelope shared by every generation call."""
     return [
-        {"role": "system", "content": "You answer questions with citations."},
+        {"role": "system", "content": load_prompt("system_cited.prompt")},
         {"role": "user", "content": prompt},
     ]
 

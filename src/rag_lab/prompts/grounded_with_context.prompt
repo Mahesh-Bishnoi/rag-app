@@ -1,0 +1,7 @@
+Answer the question using only the passages below. Cite the passages you use with their [n] markers.
+
+Passages:
+{passages}
+
+Question: {query}
+Answer:
