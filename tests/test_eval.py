@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from rag_lab.eval.cli import main
 from rag_lab.eval.metrics import (
     groundedness,
     hit_at_k,
@@ -12,7 +13,7 @@ from rag_lab.eval.metrics import (
     recall_at_k,
     reciprocal_rank,
 )
-from rag_lab.eval.run import GOLDEN, main, run_suite
+from rag_lab.eval.run import GOLDEN, run_suite
 
 GOLDEN_SIZE = 12
 
