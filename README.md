@@ -30,7 +30,7 @@ models land and attach to `target_metadata` in `alembic/env.py`).
 - `GET /health` → `{status, db, blob}`
 - `GET /v1/models` → configured chat + embedding model ids
 - `POST /v1/chat/completions` → `501` until Phase 3 wires retrieve → rerank → generate
-- `POST /v1/kb/upload` (multipart `file`; text/pdf only, 20MB cap) → `{name, blob_url, bytes}`
+- `POST /v1/kb/upload` (multipart `file`; text/pdf only, 20MB cap) → `{name, blob_url, bytes, document_id, chunk_count}` (PDF returns `415` until the PDF-loader slice lands)
 
 Default LLM transport points at Ollama (`http://localhost:11434/v1`); swap `OPENAI_BASE_URL` to any OpenAI-compatible provider.
 
