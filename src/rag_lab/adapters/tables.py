@@ -48,6 +48,15 @@ class ChunkRow(SQLModel, table=True):
     __table_args__ = (
         Index("chunks_document_id_idx", "document_id"),
         Index("chunks_text_search_idx", "text_search", postgresql_using="gin"),
+        # Mirrors migration 0002 (ADR-0014): cosine HNSW for the vector side
+        # of hybrid retrieval. A model with dim != 768 needs a migration
+        # changing vector(n) plus a Settings.embedding_dimensions bump.
+        Index(
+            "chunks_embedding_hnsw_idx",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+        ),
     )
 
     id: uuid.UUID | None = Field(default=None, sa_column=_uuid_pk())

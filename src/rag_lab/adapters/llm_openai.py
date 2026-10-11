@@ -27,3 +27,15 @@ class OpenAICompatibleLlm:
         )
         content = response.choices[0].message.content
         return content if content is not None else ""
+
+
+class StubLlm:
+    """Canned-answer fake sharing the LlmPort interface. Hermetic tests only."""
+
+    def __init__(self, answer: str = "stub answer") -> None:
+        self._answer = answer
+        self.seen: list[list[dict[str, str]]] = []
+
+    def chat(self, messages: list[dict[str, str]]) -> str:
+        self.seen.append(messages)
+        return self._answer

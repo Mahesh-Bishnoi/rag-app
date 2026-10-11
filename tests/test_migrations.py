@@ -59,7 +59,7 @@ def test_migration_upgrade_downgrade_roundtrip(
             cur.execute("SELECT version_num FROM alembic_version")
             version = cur.fetchone()
             assert version is not None
-            assert version[0] == "0001"
+            assert version[0] == "0002"
             cur.execute("SELECT to_regclass('public.documents'), to_regclass('public.chunks')")
             tables = cur.fetchone()
             assert tables is not None

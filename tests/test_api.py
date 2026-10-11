@@ -60,15 +60,6 @@ def test_models_lists_configured() -> None:
     assert len(body["data"]) == 2
 
 
-def test_chat_completions_honest_501() -> None:
-    client, _, _ = make_client()
-    response = client.post(
-        "/v1/chat/completions",
-        json={"model": "qwen2.5:3b", "messages": [{"role": "user", "content": "hi"}]},
-    )
-    assert response.status_code == 501
-
-
 def test_initiate_rejects_unsupported_type() -> None:
     client, _, _ = make_client()
     response = client.post(

@@ -39,5 +39,10 @@ def test_table_rows_validate_required_fields() -> None:
     DocumentRow(source="s", title="t", mime="text/plain", blob_url="memory://x")
 
 
+def test_chunks_carry_hybrid_search_indexes() -> None:
+    indexes = {index.name for index in SQLModel.metadata.tables["chunks"].indexes}
+    assert {"chunks_text_search_idx", "chunks_embedding_hnsw_idx"} <= indexes
+
+
 def models_columns(table: str) -> set[str]:
     return {c.name for c in SQLModel.metadata.tables[table].columns}

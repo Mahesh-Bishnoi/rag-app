@@ -2,15 +2,19 @@
 
 import logging
 import re
+import time
 import uuid
 from typing import cast
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from rag_lab.adapters.db import db_ping, get_engine
 from rag_lab.adapters.documents import DocumentStorePort, PostgresDocumentStore
+from rag_lab.adapters.embeddings import EmbeddingPort, OpenAICompatibleEmbedding
+from rag_lab.adapters.llm_openai import LlmPort, OpenAICompatibleLlm
+from rag_lab.adapters.rerank import rerank_candidates
+from rag_lab.adapters.retrieval import PostgresRetrieval, RetrievalPort
 from rag_lab.adapters.storage import (
     AzuriteBlobStorage,
     BlobStat,
@@ -18,7 +22,13 @@ from rag_lab.adapters.storage import (
     StoragePort,
 )
 from rag_lab.core.config import Settings
-from rag_lab.core.models import Document, DocumentStatusView, IngestErrorCode
+from rag_lab.core.models import (
+    Citation,
+    Document,
+    DocumentStatusView,
+    IngestErrorCode,
+    Trace,
+)
 from rag_lab.worker.pipeline import blob_name
 
 logger = logging.getLogger(__name__)
@@ -34,6 +44,21 @@ class ChatMessage(BaseModel):
 class ChatCompletionRequest(BaseModel):
     model: str
     messages: list[ChatMessage] = Field(min_length=1, max_length=100)
+
+
+class ChatCompletionChoice(BaseModel):
+    index: int
+    message: ChatMessage
+    finish_reason: str
+
+
+class ChatCompletionResponse(BaseModel):
+    id: str
+    object: str
+    created: int
+    model: str
+    choices: list[ChatCompletionChoice]
+    citations: list[Citation] = Field(default_factory=list)
 
 
 class HealthResponse(BaseModel):
@@ -130,6 +155,29 @@ def _fail_or_404(
     return failed
 
 
+def _last_user_message(messages: list[ChatMessage]) -> str | None:
+    for message in reversed(messages):
+        if message.role == "user" and message.content.strip():
+            return message.content
+    return None
+
+
+def _grounded_prompt(query: str, contexts: list[str]) -> str:
+    if not contexts:
+        return (
+            "Answer the question directly. No knowledge-base passages "
+            f"were retrieved.\n\nQuestion: {query}\nAnswer:"
+        )
+    numbered = "\n\n".join(
+        f"[{index}] {content}" for index, content in enumerate(contexts, start=1)
+    )
+    return (
+        "Answer the question using only the passages below. "
+        "Cite the passages you use with their [n] markers.\n\n"
+        f"Passages:\n{numbered}\n\nQuestion: {query}\nAnswer:"
+    )
+
+
 def _complete_upload(
     document_id: str,
     *,
@@ -162,27 +210,160 @@ def _complete_upload(
     return uploaded
 
 
+def _default_doc_store(resolved: Settings, stored: DocumentStorePort | None) -> DocumentStorePort:
+    if stored is not None:
+        return stored
+    return PostgresDocumentStore(get_engine(resolved.database_url))
+
+
+def _default_embedder(resolved: Settings, stored: EmbeddingPort | None) -> EmbeddingPort:
+    if stored is not None:
+        return stored
+    return OpenAICompatibleEmbedding(
+        base_url=resolved.embedding_base_url,
+        api_key=resolved.embedding_api_key,
+        model=resolved.embedding_model,
+    )
+
+
+def _default_retriever(resolved: Settings, stored: RetrievalPort | None) -> RetrievalPort:
+    if stored is not None:
+        return stored
+    return PostgresRetrieval(
+        get_engine(resolved.database_url),
+        expected_dim=resolved.embedding_dimensions,
+    )
+
+
+def _default_llm(resolved: Settings, stored: LlmPort | None) -> LlmPort:
+    if stored is not None:
+        return stored
+    return OpenAICompatibleLlm(
+        base_url=resolved.openai_base_url,
+        api_key=resolved.openai_api_key,
+        model=resolved.openai_model,
+    )
+
+
+def _answer_question(
+    query: str,
+    model: str,
+    *,
+    embedder: EmbeddingPort,
+    retriever: RetrievalPort,
+    llm: LlmPort,
+    retrieval_candidates: int,
+    answer_context_chunks: int,
+) -> ChatCompletionResponse:
+    """Embed → retrieve → rerank → generate. One IO per line; failures are 500s."""
+    trace_id = uuid.uuid4().hex
+    try:
+        vectors = embedder.embed([query])
+        if len(vectors) != 1:
+            raise ValueError(f"expected 1 query vector, got {len(vectors)}")
+        candidates = retriever.search(vectors[0], query, retrieval_candidates)
+    except Exception:
+        logger.exception("query retrieval failed")
+        raise HTTPException(status_code=500, detail="retrieval failed") from None
+    reranked = rerank_candidates(query, candidates, answer_context_chunks)
+    contexts = [result.chunk for result in reranked]
+    prompt = _grounded_prompt(query, [chunk.content for chunk in contexts])
+    try:
+        answer = llm.chat(
+            [
+                {"role": "system", "content": "You answer questions with citations."},
+                {"role": "user", "content": prompt},
+            ]
+        )
+    except Exception:
+        logger.exception("generation failed")
+        raise HTTPException(status_code=500, detail="generation failed") from None
+    trace = Trace(
+        trace_id=trace_id,
+        query=query,
+        retrieved=candidates,
+        rerank_order=[chunk.id or "" for chunk in contexts],
+        prompt=prompt,
+    )
+    logger.info(
+        "qa answered",
+        extra={
+            "event": "qa_answered",
+            "trace_id": trace.trace_id,
+            "query": trace.query,
+            "retrieved": [
+                (result.chunk.id, result.vector_score, result.bm25_score, result.fused_rank)
+                for result in trace.retrieved
+            ],
+            "rerank_order": trace.rerank_order,
+            "prompt_chars": len(trace.prompt),
+        },
+    )
+    return ChatCompletionResponse(
+        id=f"chatcmpl-{trace_id[:29]}",
+        object="chat.completion",
+        created=int(time.time()),
+        model=model,
+        choices=[
+            ChatCompletionChoice(
+                index=0,
+                message=ChatMessage(role="assistant", content=answer),
+                finish_reason="stop",
+            )
+        ],
+        citations=[
+            Citation(
+                chunk_id=chunk.id or "",
+                source=chunk.title,
+                title=chunk.title,
+                heading_path=chunk.heading_path,
+                page=chunk.page,
+            )
+            for chunk in contexts
+        ],
+    )
+
+
+def _storage_of(app: FastAPI, resolved: Settings) -> StoragePort:
+    return _build_storage(resolved, cast("StoragePort | None", app.state.storage))
+
+
+def _doc_store_of(app: FastAPI, resolved: Settings) -> DocumentStorePort:
+    return _default_doc_store(resolved, cast("DocumentStorePort | None", app.state.doc_store))
+
+
+def _embedder_of(app: FastAPI, resolved: Settings) -> EmbeddingPort:
+    return _default_embedder(resolved, cast("EmbeddingPort | None", app.state.embedder))
+
+
+def _retriever_of(app: FastAPI, resolved: Settings) -> RetrievalPort:
+    return _default_retriever(resolved, cast("RetrievalPort | None", app.state.retriever))
+
+
+def _llm_of(app: FastAPI, resolved: Settings) -> LlmPort:
+    return _default_llm(resolved, cast("LlmPort | None", app.state.llm))
+
+
 def create_app(
     settings: Settings | None = None,
     storage: StoragePort | None = None,
     doc_store: DocumentStorePort | None = None,
+    embedder: EmbeddingPort | None = None,
+    retriever: RetrievalPort | None = None,
+    llm: LlmPort | None = None,
 ) -> FastAPI:
     resolved = settings or Settings()
     app = FastAPI(title="rag-lab", version="0.1.0")
     app.state.settings = resolved
     app.state.storage = storage
-    app.state.doc_store = doc_store or PostgresDocumentStore(get_engine(resolved.database_url))
-
-    def get_storage() -> StoragePort:
-        stored: StoragePort | None = cast("StoragePort | None", app.state.storage)
-        return _build_storage(resolved, stored)
-
-    def get_doc_store() -> DocumentStorePort:
-        return cast("DocumentStorePort", app.state.doc_store)
+    app.state.doc_store = doc_store
+    app.state.embedder = embedder
+    app.state.retriever = retriever
+    app.state.llm = llm
 
     @app.get("/health")
     def health() -> HealthResponse:
-        store = get_storage()
+        store = _storage_of(app, resolved)
         return HealthResponse(
             status="ok",
             db=db_ping(resolved.database_url),
@@ -200,17 +381,18 @@ def create_app(
         )
 
     @app.post("/v1/chat/completions")
-    def chat_completions(body: ChatCompletionRequest) -> JSONResponse:
-        # Phase 3 wires retrieve → rerank → generate here.
-        # Skeleton stays honest: validate shape, report not-wired.
-        return JSONResponse(
-            status_code=501,
-            content={
-                "error": {
-                    "message": "rag pipeline not wired yet (Phase 3)",
-                    "type": "not_implemented",
-                }
-            },
+    def chat_completions(body: ChatCompletionRequest) -> ChatCompletionResponse:
+        query = _last_user_message(body.messages)
+        if query is None:
+            raise HTTPException(status_code=422, detail="no user message")
+        return _answer_question(
+            query,
+            body.model,
+            embedder=_embedder_of(app, resolved),
+            retriever=_retriever_of(app, resolved),
+            llm=_llm_of(app, resolved),
+            retrieval_candidates=resolved.retrieval_candidates,
+            answer_context_chunks=resolved.answer_context_chunks,
         )
 
     @app.post("/v1/kb/uploads/initiate")
@@ -218,8 +400,8 @@ def create_app(
         return _initiate_upload(
             body,
             max_upload_bytes=resolved.max_upload_bytes,
-            storage=get_storage(),
-            doc_store=get_doc_store(),
+            storage=_storage_of(app, resolved),
+            doc_store=_doc_store_of(app, resolved),
         )
 
     @app.post("/v1/kb/uploads/{document_id}/complete")
@@ -227,13 +409,13 @@ def create_app(
         return _complete_upload(
             document_id,
             max_upload_bytes=resolved.max_upload_bytes,
-            storage=get_storage(),
-            doc_store=get_doc_store(),
+            storage=_storage_of(app, resolved),
+            doc_store=_doc_store_of(app, resolved),
         )
 
     @app.get("/v1/kb/documents/{document_id}")
     def get_document(document_id: str) -> DocumentStatusView:
-        view = get_doc_store().get_status(document_id)
+        view = _doc_store_of(app, resolved).get_status(document_id)
         if view is None:
             raise HTTPException(status_code=404, detail="unknown document")
         return view
