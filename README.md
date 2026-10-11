@@ -30,13 +30,13 @@ models land and attach to `target_metadata` in `alembic/env.py`).
 - `GET /health` → `{status, db, blob}`
 - `GET /v1/models` → configured chat + embedding model ids
 - `POST /v1/chat/completions` → `501` until Phase 3 wires retrieve → rerank → generate
-- `POST /v1/kb/upload` (multipart `file`; text/pdf only, 20MB cap) → `{name, blob_url, bytes, document_id, chunk_count}` (PDF returns `415` until the PDF-loader slice lands)
+- `POST /v1/kb/upload` (multipart `file`; text/pdf only, 20MB cap) → `{name, blob_url, bytes, document_id, chunk_count}` (load → heading-aware split → embed → blob put → persist; empty-after-split and corrupt/encrypted/image-only PDFs return `422`, embed/persist failures return `500`)
 
 Default LLM transport points at Ollama (`http://localhost:11434/v1`); swap `OPENAI_BASE_URL` to any OpenAI-compatible provider.
 
 ## Layout
 
 - `src/rag_lab/core/` — `Settings`, Pydantic schemas (`Document`, `Chunk`, `RetrievalResult`, `AnswerWithCitations`, `Trace`)
-- `src/rag_lab/adapters/` — `OpenAICompatibleLlm`, `StoragePort` (Azurite + in-memory fake), `db_ping`
-- `src/rag_lab/ingest/` — `LoaderPort`, `TextLoader` (PDF next)
+- `src/rag_lab/adapters/` — `OpenAICompatibleLlm` (chat), `EmbeddingPort` (OpenAI-compatible + stub fake), `StoragePort` (Azurite + in-memory fake), `DocumentStorePort` (Postgres + in-memory fake), `db_ping`
+- `src/rag_lab/ingest/` — `LoaderPort`, `TextLoader`, `PdfLoader`, `split_chunks` (heading-aware, overlap windows)
 - `compose.yaml` — `db` (pgvector:pg16, :5432), `azurite` (:10000-10002)

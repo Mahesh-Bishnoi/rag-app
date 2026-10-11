@@ -1,7 +1,8 @@
-"""OpenAI-compatible LLM/embedding transport.
+"""OpenAI-compatible chat transport.
 
 One client, many backends: Ollama locally (default) or any provider
-by swapping base_url/key/model. No framework logic here — the
+by swapping base_url/key/model. Embeddings live behind the separate
+EmbeddingPort in adapters/embeddings.py. No framework logic here — the
 PydanticAI generation layer calls through this port in Phase 3.
 """
 
@@ -12,7 +13,6 @@ from openai import OpenAI
 
 class LlmPort(Protocol):
     def chat(self, messages: list[dict[str, str]]) -> str: ...
-    def embed(self, texts: list[str]) -> list[list[float]]: ...
 
 
 class OpenAICompatibleLlm:
@@ -27,7 +27,3 @@ class OpenAICompatibleLlm:
         )
         content = response.choices[0].message.content
         return content if content is not None else ""
-
-    def embed(self, texts: list[str]) -> list[list[float]]:
-        response = self._client.embeddings.create(model=self._model, input=texts)
-        return [item.embedding for item in response.data]

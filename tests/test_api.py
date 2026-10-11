@@ -1,20 +1,25 @@
+from conftest import minimal_pdf
 from fastapi.testclient import TestClient
 
 from rag_lab.adapters.documents import InMemoryDocumentStore
+from rag_lab.adapters.embeddings import EmbeddingPort, StubEmbedding
 from rag_lab.adapters.storage import InMemoryStorage
 from rag_lab.api.main import create_app
 from rag_lab.core.config import Settings
 from rag_lab.core.models import Chunk, Document
 
 
-def make_client() -> tuple[TestClient, InMemoryDocumentStore]:
+def make_client(embedder: EmbeddingPort | None = None) -> tuple[TestClient, InMemoryDocumentStore]:
     settings = Settings(
         database_url="postgresql://rag:rag@localhost:5432/raglab",
         azurite_connection_string="",
         max_upload_bytes=1024,
     )
     docs = InMemoryDocumentStore()
-    client = TestClient(create_app(settings=settings, storage=InMemoryStorage(), doc_store=docs))
+    active = StubEmbedding() if embedder is None else embedder
+    client = TestClient(
+        create_app(settings=settings, storage=InMemoryStorage(), doc_store=docs, embedder=active)
+    )
     return client, docs
 
 
@@ -90,15 +95,45 @@ def test_upload_roundtrip_text() -> None:
     assert stored.mime == "text/plain"
     assert stored.blob_url == body["blob_url"]
     assert [chunk.content for chunk in docs.chunks[document_id]] == ["hello rag"]
+    assert docs.chunks[document_id][0].embedding == [0.0] * 768
 
 
-def test_upload_pdf_without_loader_is_415() -> None:
+def test_upload_roundtrip_pdf() -> None:
+    client, docs = make_client()
+    response = client.post(
+        "/v1/kb/upload",
+        files={"file": ("doc.pdf", minimal_pdf(["hello pdf", "page two"]), "application/pdf")},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["chunk_count"] == 2
+    assert body["document_id"]
+    stored = docs.chunks[body["document_id"]]
+    assert [chunk.content for chunk in stored] == ["hello pdf", "page two"]
+    assert [chunk.page for chunk in stored] == [1, 2]
+
+
+def test_upload_splits_long_markdown_and_keeps_headings() -> None:
+    client, docs = make_client()
+    body_text = b"# Alpha\n\n" + b"x" * 300 + b"\n\n## Beta\n\n" + b"y" * 300 + b"\n"
+    response = client.post(
+        "/v1/kb/upload",
+        files={"file": ("note.md", body_text, "text/markdown")},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["chunk_count"] == 2
+    stored = docs.chunks[payload["document_id"]]
+    assert [chunk.heading_path for chunk in stored] == ["Alpha", "Alpha > Beta"]
+
+
+def test_upload_rejects_corrupt_pdf() -> None:
     client, _ = make_client()
     response = client.post(
         "/v1/kb/upload",
         files={"file": ("doc.pdf", b"%PDF-1.4 fake", "application/pdf")},
     )
-    assert response.status_code == 415
+    assert response.status_code == 422
 
 
 def test_upload_rejects_non_utf8_text() -> None:
@@ -119,6 +154,21 @@ def test_upload_returns_500_when_persist_fails() -> None:
     client = TestClient(
         create_app(settings=settings, storage=InMemoryStorage(), doc_store=_FailingStore())
     )
+    response = client.post(
+        "/v1/kb/upload",
+        files={"file": ("note.txt", b"hello rag", "text/plain")},
+    )
+    assert response.status_code == 500
+    assert response.json()["detail"] == "ingest failed"
+
+
+class _FailingEmbedder:
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        raise RuntimeError("llm down")
+
+
+def test_upload_returns_500_when_embed_fails() -> None:
+    client, _ = make_client(embedder=_FailingEmbedder())
     response = client.post(
         "/v1/kb/upload",
         files={"file": ("note.txt", b"hello rag", "text/plain")},

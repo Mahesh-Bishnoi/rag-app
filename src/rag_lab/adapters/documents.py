@@ -73,6 +73,7 @@ class PostgresDocumentStore:
                         mime=chunk.mime,
                         byte_start=chunk.byte_start,
                         byte_end=chunk.byte_end,
+                        embedding=chunk.embedding,
                     )
                 )
             session.commit()

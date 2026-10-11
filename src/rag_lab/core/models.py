@@ -21,6 +21,7 @@ class Chunk(BaseModel):
     mime: str = "text/plain"
     byte_start: int | None = None
     byte_end: int | None = None
+    embedding: list[float] | None = None
 
 
 class RetrievalResult(BaseModel):

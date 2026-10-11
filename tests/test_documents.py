@@ -40,6 +40,13 @@ def test_in_memory_save_rejects_empty_chunks() -> None:
         InMemoryDocumentStore().save(_document(), [])
 
 
+def test_in_memory_save_preserves_embeddings() -> None:
+    store = InMemoryDocumentStore()
+    chunk = _chunks()[0].model_copy(update={"embedding": [0.25] * 768})
+    document_id = store.save(_document(), [chunk])
+    assert store.chunks[document_id][0].embedding == [0.25] * 768
+
+
 def test_postgres_save_rejects_empty_chunks() -> None:
     engine = get_engine("postgresql://rag:rag@localhost:5432/raglab")
     try:
@@ -63,6 +70,31 @@ def test_postgres_save_roundtrip() -> None:
             for row in rows:
                 session.delete(row)
             session.delete(doc)
+            session.commit()
+    finally:
+        engine.dispose()
+
+
+@needs_live
+def test_postgres_save_roundtrip_with_embeddings() -> None:
+    engine = get_engine(Settings().database_url)
+    try:
+        chunk = _chunks()[0].model_copy(update={"embedding": [0.1] * 768})
+        document_id = PostgresDocumentStore(engine).save(_document(), [chunk])
+        with Session(engine) as session:
+            rows = list(
+                session.exec(
+                    select(ChunkRow).where(ChunkRow.document_id == uuid.UUID(document_id))
+                ).all()
+            )
+            assert len(rows) == 1
+            assert rows[0].embedding is not None
+            assert len(rows[0].embedding or []) == 768
+            for row in rows:
+                session.delete(row)
+            doc = session.get(DocumentRow, uuid.UUID(document_id))
+            if doc is not None:
+                session.delete(doc)
             session.commit()
     finally:
         engine.dispose()

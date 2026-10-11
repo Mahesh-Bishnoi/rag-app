@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from rag_lab.adapters.db import db_ping, get_engine
 from rag_lab.adapters.documents import DocumentStorePort, PostgresDocumentStore
+from rag_lab.adapters.embeddings import EmbeddingPort, OpenAICompatibleEmbedding
 from rag_lab.adapters.storage import (
     AzuriteBlobStorage,
     InMemoryStorage,
@@ -18,7 +19,8 @@ from rag_lab.adapters.storage import (
 )
 from rag_lab.core.config import Settings
 from rag_lab.core.models import Chunk, Document
-from rag_lab.ingest.loaders import LoaderPort, TextLoader
+from rag_lab.ingest.chunking import split_chunks
+from rag_lab.ingest.loaders import LoaderPort, PdfLoader, TextLoader
 
 logger = logging.getLogger(__name__)
 SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]")
@@ -84,6 +86,20 @@ def _load_chunks(loader: LoaderPort, data: bytes, source: str) -> list[Chunk] | 
         return None
 
 
+def _embed_chunks(chunks: list[Chunk], embedder: EmbeddingPort) -> list[Chunk] | None:
+    """Attach one vector per chunk. None means embed failed (caller maps to 500)."""
+    try:
+        vectors = embedder.embed([chunk.content for chunk in chunks])
+    except Exception:
+        return None
+    if len(vectors) != len(chunks):
+        return None
+    return [
+        chunk.model_copy(update={"embedding": vector})
+        for chunk, vector in zip(chunks, vectors, strict=True)
+    ]
+
+
 async def _upload_file(
     file: UploadFile,
     *,
@@ -91,8 +107,9 @@ async def _upload_file(
     loaders: list[LoaderPort],
     storage: StoragePort,
     doc_store: DocumentStorePort,
+    embedder: EmbeddingPort | None = None,
 ) -> UploadResponse:
-    """Validate → load → put blob → persist document+chunks. One side effect per line."""
+    """Validate → load → split → embed → put blob → persist. One side effect per line."""
     content_type = file.content_type or "application/octet-stream"
     if content_type not in ALLOWED_CONTENT_TYPES:
         raise HTTPException(status_code=415, detail="unsupported media type")
@@ -104,22 +121,30 @@ async def _upload_file(
     original = file.filename or "upload"
     loader = _select_loader(loaders, original, content_type)
     if loader is None:
-        # Honest until the PDF slice lands a loader: allowlisted but not ingestible yet.
         raise HTTPException(status_code=415, detail="unsupported media type")
     loaded = _load_chunks(loader, data, source=original)
     if loaded is None:
         raise HTTPException(status_code=422, detail="unprocessable file")
+    chunks = split_chunks(loaded)
+    if not chunks:
+        raise HTTPException(status_code=422, detail="unprocessable file")
+    if embedder is not None:
+        embedded = _embed_chunks(chunks, embedder)
+        if embedded is None:
+            logger.exception("chunk embedding failed")
+            raise HTTPException(status_code=500, detail="ingest failed")
+        chunks = embedded
     filename = SAFE_NAME.sub("_", original)
     name = f"{uuid.uuid4()}-{filename}"
     url = storage.put(name, data, content_type)
     document = Document(
         source=original,
-        title=loaded[0].title or filename,
+        title=chunks[0].title or filename,
         mime=content_type,
         blob_url=url,
     )
     try:
-        document_id = doc_store.save(document, loaded)
+        document_id = doc_store.save(document, chunks)
     except Exception as e:
         logger.exception("document persist failed")
         raise HTTPException(status_code=500, detail="ingest failed") from e
@@ -128,7 +153,7 @@ async def _upload_file(
         blob_url=url,
         bytes=len(data),
         document_id=document_id,
-        chunk_count=len(loaded),
+        chunk_count=len(chunks),
     )
 
 
@@ -136,13 +161,15 @@ def create_app(
     settings: Settings | None = None,
     storage: StoragePort | None = None,
     doc_store: DocumentStorePort | None = None,
+    embedder: EmbeddingPort | None = None,
 ) -> FastAPI:
     resolved = settings or Settings()
     app = FastAPI(title="rag-lab", version="0.1.0")
     app.state.settings = resolved
     app.state.storage = storage
     app.state.doc_store = doc_store or PostgresDocumentStore(get_engine(resolved.database_url))
-    app.state.loaders = [TextLoader()]
+    app.state.loaders = [TextLoader(), PdfLoader()]
+    app.state.embedder = embedder
 
     def get_storage() -> StoragePort:
         stored: StoragePort | None = cast("StoragePort | None", app.state.storage)
@@ -150,6 +177,9 @@ def create_app(
 
     def get_doc_store() -> DocumentStorePort:
         return cast("DocumentStorePort", app.state.doc_store)
+
+    def get_embedder() -> EmbeddingPort | None:
+        return cast("EmbeddingPort | None", app.state.embedder)
 
     @app.get("/health")
     def health() -> HealthResponse:
@@ -192,9 +222,19 @@ def create_app(
             loaders=cast("list[LoaderPort]", app.state.loaders),
             storage=get_storage(),
             doc_store=get_doc_store(),
+            embedder=get_embedder(),
         )
 
     return app
 
 
-app = create_app()
+def _default_embedder(resolved: Settings) -> EmbeddingPort:
+    return OpenAICompatibleEmbedding(
+        base_url=resolved.embedding_base_url,
+        api_key=resolved.embedding_api_key,
+        model=resolved.embedding_model,
+    )
+
+
+_module_settings = Settings()
+app = create_app(settings=_module_settings, embedder=_default_embedder(_module_settings))

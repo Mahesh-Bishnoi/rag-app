@@ -19,6 +19,7 @@ dependencies = [
     "fastapi-cli>=0.0.32",
     "sqlmodel>=0.0.48",
     "pgvector>=0.5.1",
+    "pypdf>=6.20",
 ]
 
 [dependency-groups]
