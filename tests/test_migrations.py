@@ -7,8 +7,12 @@ from typing import Any
 import psycopg
 import pytest
 from alembic.config import Config
+from sqlalchemy import MetaData
+from sqlmodel import SQLModel
 
 from alembic import command
+from rag_lab.adapters.db import get_engine
+from rag_lab.adapters.tables import ChunkRow, DocumentRow  # noqa: F401
 from rag_lab.core.config import Settings
 
 LIVE = os.environ.get("RAGLAB_LIVE_DB") == "1"
@@ -24,6 +28,20 @@ def _base_url() -> str:
 
 def _admin_connect() -> psycopg.Connection[Any]:
     return psycopg.connect(f"{_base_url()}/raglab", autocommit=True)
+
+
+def assert_migrated_schema_matches_models(database_url: str) -> None:
+    engine = get_engine(database_url)
+    try:
+        reflected = MetaData()
+        reflected.reflect(bind=engine)
+        assert set(SQLModel.metadata.tables) <= set(reflected.tables)
+        for name in SQLModel.metadata.tables:
+            assert {c.name for c in SQLModel.metadata.tables[name].columns} == {
+                c.name for c in reflected.tables[name].columns
+            }
+    finally:
+        engine.dispose()
 
 
 @needs_live
@@ -46,6 +64,7 @@ def test_migration_upgrade_downgrade_roundtrip(
             tables = cur.fetchone()
             assert tables is not None
             assert all(table is not None for table in tables)
+        assert_migrated_schema_matches_models(f"{_base_url()}/{SCRATCH_DB}")
         command.downgrade(cfg, "base")
         with psycopg.connect(f"{_base_url()}/{SCRATCH_DB}") as conn, conn.cursor() as cur:
             cur.execute("SELECT to_regclass('public.documents'), to_regclass('public.chunks')")

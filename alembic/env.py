@@ -3,8 +3,10 @@
 from logging.config import fileConfig
 
 from sqlalchemy import engine_from_config, pool
+from sqlmodel import SQLModel
 
 from alembic import context
+from rag_lab.adapters.tables import ChunkRow, DocumentRow  # noqa: F401
 from rag_lab.core.config import Settings
 
 config = context.config
@@ -17,7 +19,7 @@ config.set_main_option(
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-target_metadata = None
+target_metadata = SQLModel.metadata
 
 
 def run_migrations_offline() -> None:

@@ -13,7 +13,9 @@
   set — dropping a rule needs a stated reason.
 - FastAPI: vendor skill (`.agents/skills/fastapi`, version-matched) overrides
   generic habits — `Annotated` params, Pydantic returns, `fastapi dev`/`run`.
-  Project ADRs override the skill (e.g. SQLAlchemy over SQLModel, ADR-0007).
+  Project ADRs override the skill where recorded.
+- Persistence: SQLModel table rows (`adapters/tables.py`) mirror migrations
+  exactly; Pydantic DTOs are never persisted and rows never leave endpoints.
 - Tests: `pytest` + `pytest-cov`, floor 80 (`--cov-fail-under=80`). Hermetic by
   default; live-service tests (postgres, Azurite) behind `RAGLAB_LIVE_DB=1`
   and skipped otherwise. Migrations prove themselves with an
