@@ -1,7 +1,9 @@
 """Baseline schema: extensions + documents + chunks.
 
-Mirrors the skeleton-phase init SQL that the dev database was built with,
-so existing volumes stamp to this revision instead of re-running it.
+Async ingest (ADR-0013): documents carry a stage status + typed error_code
+with a partial index over claimable rows. Still in development with no prod
+data, so the baseline is rewritten instead of appended. Existing dev volumes
+must be recreated: compose down -v && compose up -d && alembic upgrade head.
 """
 
 from collections.abc import Sequence
@@ -25,6 +27,11 @@ def upgrade() -> None:
             title TEXT NOT NULL,
             mime TEXT NOT NULL,
             blob_url TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'initiated'
+                CHECK (status IN (
+                    'initiated', 'uploaded', 'chunking',
+                    'embedding', 'finished', 'failed')),
+            error_code TEXT,
             created_at TIMESTAMPTZ NOT NULL DEFAULT now()
         )
         """
@@ -48,6 +55,9 @@ def upgrade() -> None:
     )
     op.execute("CREATE INDEX chunks_document_id_idx ON chunks (document_id)")
     op.execute("CREATE INDEX chunks_text_search_idx ON chunks USING GIN (text_search)")
+    op.execute(
+        "CREATE INDEX documents_claim_idx ON documents (created_at) WHERE status = 'uploaded'"
+    )
 
 
 def downgrade() -> None:

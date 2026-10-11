@@ -12,7 +12,6 @@ dependencies = [
     "psycopg[binary]>=3.1",
     "azure-storage-blob>=12.20",
     "openai>=1.40",
-    "python-multipart>=0.0.18",
     "sqlalchemy>=2.1",
     "alembic>=1.20",
     "azure-core>=1.41.0",
@@ -60,9 +59,8 @@ ignore_missing_imports = false
 entrypoint = "rag_lab.api.main:app"
 
 [tool.deptry.per_rule_ignores]
-# Used without being imported: uvicorn/fastapi-cli run the server via CLI,
-# python-multipart is exercised implicitly by Starlette form/file parsing.
-DEP002 = ["uvicorn", "fastapi-cli", "python-multipart"]
+# Used without being imported: uvicorn/fastapi-cli run the server via CLI.
+DEP002 = ["uvicorn", "fastapi-cli"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

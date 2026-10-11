@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Column, Computed, DateTime, ForeignKey, Index, text
+from sqlalchemy import CheckConstraint, Column, Computed, DateTime, ForeignKey, Index, text
 from sqlalchemy.dialects.postgresql import TSVECTOR
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlmodel import Field, SQLModel
@@ -22,12 +22,21 @@ def _uuid_pk() -> Column[uuid.UUID]:
 
 class DocumentRow(SQLModel, table=True):
     __tablename__ = "documents"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('initiated', 'uploaded', 'chunking', 'embedding', 'finished', 'failed')",
+            name="documents_status_check",
+        ),
+        Index("documents_claim_idx", "created_at", postgresql_where=text("status = 'uploaded'")),
+    )
 
     id: uuid.UUID | None = Field(default=None, sa_column=_uuid_pk())
     source: str
     title: str
     mime: str
     blob_url: str
+    status: str = "initiated"
+    error_code: str | None = None
     created_at: datetime | None = Field(
         default=None,
         sa_column=Column(DateTime(timezone=True), nullable=False, server_default=text("now()")),

@@ -1,6 +1,21 @@
 """Shared Pydantic v2 schemas. Stage boundaries log these shapes."""
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
+
+DocumentStatus = Literal["initiated", "uploaded", "chunking", "embedding", "finished", "failed"]
+
+IngestErrorCode = Literal[
+    "upload_incomplete",
+    "blob_missing",
+    "size_exceeded",
+    "type_mismatch",
+    "decode_failed",
+    "empty_content",
+    "embed_failed",
+    "persist_failed",
+]
 
 
 class Document(BaseModel):
@@ -9,6 +24,13 @@ class Document(BaseModel):
     title: str = Field(min_length=1, max_length=512)
     mime: str = Field(min_length=1, max_length=128)
     blob_url: str = Field(min_length=1, max_length=2048)
+
+
+class DocumentStatusView(BaseModel):
+    document_id: str
+    status: DocumentStatus
+    chunk_count: int = Field(ge=0)
+    error_code: IngestErrorCode | None = None
 
 
 class Chunk(BaseModel):

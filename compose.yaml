@@ -31,6 +31,27 @@ services:
     volumes:
       - azurite-data:/data
 
+  # shortcut: tag without digest pin; pin via `podman pull` digest once the
+  # worker loop proves stable (ADR-0006 bump process).
+  worker:
+    image: ghcr.io/astral-sh/uv:python3.13-bookworm-slim
+    container_name: rag-lab-worker
+    restart: unless-stopped
+    volumes:
+      - .:/app
+    working_dir: /app
+    network_mode: host
+    environment:
+      DATABASE_URL: postgresql://rag:rag@localhost:5432/raglab
+      AZURITE_CONNECTION_STRING: DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;
+      BLOB_CONTAINER: kb-raw
+    depends_on:
+      db:
+        condition: service_healthy
+      azurite:
+        condition: service_started
+    command: ["uv", "run", "--no-dev", "python", "-m", "rag_lab.worker.run"]
+
 volumes:
   pgdata:
   azurite-data:

@@ -1,26 +1,25 @@
-"""FastAPI entrypoint. OpenAI-compatible shape; RAG wiring lands in Phase 3."""
+"""FastAPI entrypoint. OpenAI-compatible shape; ingest is async signed-URL."""
 
 import logging
 import re
 import uuid
-from typing import Annotated, cast
+from typing import cast
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from rag_lab.adapters.db import db_ping, get_engine
 from rag_lab.adapters.documents import DocumentStorePort, PostgresDocumentStore
-from rag_lab.adapters.embeddings import EmbeddingPort, OpenAICompatibleEmbedding
 from rag_lab.adapters.storage import (
     AzuriteBlobStorage,
+    BlobStat,
     InMemoryStorage,
     StoragePort,
 )
 from rag_lab.core.config import Settings
-from rag_lab.core.models import Chunk, Document
-from rag_lab.ingest.chunking import split_chunks
-from rag_lab.ingest.loaders import LoaderPort, PdfLoader, TextLoader
+from rag_lab.core.models import Document, DocumentStatusView, IngestErrorCode
+from rag_lab.worker.pipeline import blob_name
 
 logger = logging.getLogger(__name__)
 SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]")
@@ -53,12 +52,16 @@ class ModelsResponse(BaseModel):
     data: list[ModelEntry]
 
 
-class UploadResponse(BaseModel):
-    name: str
-    blob_url: str
-    bytes: int
+class InitiateUploadRequest(BaseModel):
+    filename: str = Field(min_length=1, max_length=512)
+    content_type: str = Field(min_length=1, max_length=128)
+    size_bytes: int = Field(gt=0)
+
+
+class InitiateUploadResponse(BaseModel):
     document_id: str
-    chunk_count: int
+    upload_url: str
+    expires_in: int
 
 
 def _build_storage(settings: Settings, stored: StoragePort | None) -> StoragePort:
@@ -69,107 +72,106 @@ def _build_storage(settings: Settings, stored: StoragePort | None) -> StoragePor
     return InMemoryStorage()
 
 
-def _select_loader(
-    loaders: list[LoaderPort], filename: str, content_type: str
-) -> LoaderPort | None:
-    return next(
-        (candidate for candidate in loaders if candidate.can_handle(filename, content_type)),
-        None,
-    )
+def _verify_blob(meta: BlobStat, declared_mime: str, max_bytes: int) -> IngestErrorCode | None:
+    """Check HEAD results against the declared upload. None means acceptable."""
+    if meta.size > max_bytes:
+        return "size_exceeded"
+    if meta.size == 0:
+        return "empty_content"
+    if meta.content_type != declared_mime:
+        return "type_mismatch"
+    return None
 
 
-def _load_chunks(loader: LoaderPort, data: bytes, source: str) -> list[Chunk] | None:
-    """Decode bytes via loader. None means unprocessable (caller maps to 422)."""
-    try:
-        return loader.load(data, source=source) or None
-    except (UnicodeDecodeError, ValueError):
-        return None
-
-
-def _embed_chunks(chunks: list[Chunk], embedder: EmbeddingPort) -> list[Chunk] | None:
-    """Attach one vector per chunk. None means embed failed (caller maps to 500)."""
-    try:
-        vectors = embedder.embed([chunk.content for chunk in chunks])
-    except Exception:
-        return None
-    if len(vectors) != len(chunks):
-        return None
-    return [
-        chunk.model_copy(update={"embedding": vector})
-        for chunk, vector in zip(chunks, vectors, strict=True)
-    ]
-
-
-async def _upload_file(
-    file: UploadFile,
+def _initiate_upload(
+    body: InitiateUploadRequest,
     *,
     max_upload_bytes: int,
-    loaders: list[LoaderPort],
     storage: StoragePort,
     doc_store: DocumentStorePort,
-    embedder: EmbeddingPort | None = None,
-) -> UploadResponse:
-    """Validate → load → split → embed → put blob → persist. One side effect per line."""
-    content_type = file.content_type or "application/octet-stream"
-    if content_type not in ALLOWED_CONTENT_TYPES:
+) -> InitiateUploadResponse:
+    """Validate → mint signed URL → persist initiated row. One side effect per line."""
+    if body.content_type not in ALLOWED_CONTENT_TYPES:
         raise HTTPException(status_code=415, detail="unsupported media type")
-    data = await file.read()
-    if len(data) > max_upload_bytes:
+    if body.size_bytes > max_upload_bytes:
         raise HTTPException(status_code=413, detail="file too large")
-    if not data:
-        raise HTTPException(status_code=422, detail="empty file")
-    original = file.filename or "upload"
-    loader = _select_loader(loaders, original, content_type)
-    if loader is None:
-        raise HTTPException(status_code=415, detail="unsupported media type")
-    loaded = _load_chunks(loader, data, source=original)
-    if loaded is None:
-        raise HTTPException(status_code=422, detail="unprocessable file")
-    chunks = split_chunks(loaded)
-    if not chunks:
-        raise HTTPException(status_code=422, detail="unprocessable file")
-    if embedder is not None:
-        embedded = _embed_chunks(chunks, embedder)
-        if embedded is None:
-            logger.exception("chunk embedding failed")
-            raise HTTPException(status_code=500, detail="ingest failed")
-        chunks = embedded
-    filename = SAFE_NAME.sub("_", original)
-    name = f"{uuid.uuid4()}-{filename}"
-    url = storage.put(name, data, content_type)
+    sanitized = SAFE_NAME.sub("_", body.filename.rsplit("/", 1)[-1])
+    if not sanitized.strip("._"):
+        raise HTTPException(status_code=422, detail="invalid filename")
+    key = f"{uuid.uuid4()}-{sanitized}"
+    try:
+        canonical = storage.blob_url(key)
+        upload_url, expires_in = storage.issue_upload_url(key, body.content_type)
+    except Exception:
+        logger.exception("upload URL issue failed")
+        raise HTTPException(status_code=500, detail="ingest failed") from None
     document = Document(
-        source=original,
-        title=chunks[0].title or filename,
-        mime=content_type,
-        blob_url=url,
+        source=body.filename,
+        title=sanitized,
+        mime=body.content_type,
+        blob_url=canonical,
     )
     try:
-        document_id = doc_store.save(document, chunks)
-    except Exception as e:
-        logger.exception("document persist failed")
-        raise HTTPException(status_code=500, detail="ingest failed") from e
-    return UploadResponse(
-        name=name,
-        blob_url=url,
-        bytes=len(data),
-        document_id=document_id,
-        chunk_count=len(chunks),
+        document_id = doc_store.initiate(document)
+    except Exception:
+        logger.exception("document initiate failed")
+        raise HTTPException(status_code=500, detail="ingest failed") from None
+    return InitiateUploadResponse(
+        document_id=document_id, upload_url=upload_url, expires_in=expires_in
     )
+
+
+def _fail_or_404(
+    doc_store: DocumentStorePort, document_id: str, error_code: IngestErrorCode
+) -> DocumentStatusView:
+    failed = doc_store.fail(document_id, error_code)
+    if failed is None:
+        raise HTTPException(status_code=404, detail="unknown document")
+    return failed
+
+
+def _complete_upload(
+    document_id: str,
+    *,
+    max_upload_bytes: int,
+    storage: StoragePort,
+    doc_store: DocumentStorePort,
+) -> DocumentStatusView:
+    """HEAD the blob → flip initiated to uploaded, or record a typed failure."""
+    current = doc_store.get_status(document_id)
+    if current is None:
+        raise HTTPException(status_code=404, detail="unknown document")
+    if current.status != "initiated":
+        return current
+    doc = doc_store.get_document(document_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="unknown document")
+    try:
+        meta = storage.stat(blob_name(doc.blob_url))
+    except Exception:
+        logger.exception("blob stat failed for %s", document_id)
+        raise HTTPException(status_code=500, detail="ingest failed") from None
+    if meta is None:
+        return _fail_or_404(doc_store, document_id, "upload_incomplete")
+    code = _verify_blob(meta, doc.mime, max_upload_bytes)
+    if code is not None:
+        return _fail_or_404(doc_store, document_id, code)
+    uploaded = doc_store.mark_uploaded(document_id)
+    if uploaded is None:
+        raise HTTPException(status_code=404, detail="unknown document")
+    return uploaded
 
 
 def create_app(
     settings: Settings | None = None,
     storage: StoragePort | None = None,
     doc_store: DocumentStorePort | None = None,
-    embedder: EmbeddingPort | None = None,
 ) -> FastAPI:
     resolved = settings or Settings()
     app = FastAPI(title="rag-lab", version="0.1.0")
     app.state.settings = resolved
     app.state.storage = storage
     app.state.doc_store = doc_store or PostgresDocumentStore(get_engine(resolved.database_url))
-    app.state.loaders = [TextLoader(), PdfLoader()]
-    app.state.embedder = embedder
 
     def get_storage() -> StoragePort:
         stored: StoragePort | None = cast("StoragePort | None", app.state.storage)
@@ -177,9 +179,6 @@ def create_app(
 
     def get_doc_store() -> DocumentStorePort:
         return cast("DocumentStorePort", app.state.doc_store)
-
-    def get_embedder() -> EmbeddingPort | None:
-        return cast("EmbeddingPort | None", app.state.embedder)
 
     @app.get("/health")
     def health() -> HealthResponse:
@@ -214,27 +213,32 @@ def create_app(
             },
         )
 
-    @app.post("/v1/kb/upload")
-    async def kb_upload(file: Annotated[UploadFile, File()]) -> UploadResponse:
-        return await _upload_file(
-            file,
+    @app.post("/v1/kb/uploads/initiate")
+    def initiate_upload(body: InitiateUploadRequest) -> InitiateUploadResponse:
+        return _initiate_upload(
+            body,
             max_upload_bytes=resolved.max_upload_bytes,
-            loaders=cast("list[LoaderPort]", app.state.loaders),
             storage=get_storage(),
             doc_store=get_doc_store(),
-            embedder=get_embedder(),
         )
+
+    @app.post("/v1/kb/uploads/{document_id}/complete")
+    def complete_upload(document_id: str) -> DocumentStatusView:
+        return _complete_upload(
+            document_id,
+            max_upload_bytes=resolved.max_upload_bytes,
+            storage=get_storage(),
+            doc_store=get_doc_store(),
+        )
+
+    @app.get("/v1/kb/documents/{document_id}")
+    def get_document(document_id: str) -> DocumentStatusView:
+        view = get_doc_store().get_status(document_id)
+        if view is None:
+            raise HTTPException(status_code=404, detail="unknown document")
+        return view
 
     return app
 
 
-def _default_embedder(resolved: Settings) -> EmbeddingPort:
-    return OpenAICompatibleEmbedding(
-        base_url=resolved.embedding_base_url,
-        api_key=resolved.embedding_api_key,
-        model=resolved.embedding_model,
-    )
-
-
-_module_settings = Settings()
-app = create_app(settings=_module_settings, embedder=_default_embedder(_module_settings))
+app = create_app()

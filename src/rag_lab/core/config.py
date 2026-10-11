@@ -16,3 +16,4 @@ class Settings(BaseSettings):
     embedding_api_key: str = "ollama"
     embedding_model: str = "nomic-embed-text"
     max_upload_bytes: int = 20 * 1024 * 1024
+    ingest_poll_seconds: float = 1.0

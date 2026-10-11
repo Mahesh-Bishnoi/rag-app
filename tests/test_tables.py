@@ -15,6 +15,8 @@ def test_metadata_tables_match_baseline() -> None:
         "title",
         "mime",
         "blob_url",
+        "status",
+        "error_code",
         "created_at",
     }
     assert models_columns("chunks") == {
