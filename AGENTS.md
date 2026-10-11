@@ -8,9 +8,12 @@
 - Types: `mypy strict = true`, `ignore_missing_imports = false`. No new `Any`
   without a recorded reason; narrow at boundaries (`cast` only for untyped
   framework attrs like FastAPI `app.state`).
-- Lint: ruff `E,F,I,UP,B,C4,SIM,S,RUF,A,G,PTH,RET,C90,PT,FBT`, complexity ≤10.
-  `per-file-ignores` for tests only (`S101`). Never silently narrow the set —
-  dropping a rule needs a stated reason.
+- Lint: ruff `E,F,I,UP,B,C4,SIM,S,RUF,A,G,PTH,RET,C90,PT,FBT,FAST`, complexity
+  ≤10. `per-file-ignores` for tests only (`S101`). Never silently narrow the
+  set — dropping a rule needs a stated reason.
+- FastAPI: vendor skill (`.agents/skills/fastapi`, version-matched) overrides
+  generic habits — `Annotated` params, Pydantic returns, `fastapi dev`/`run`.
+  Project ADRs override the skill (e.g. SQLAlchemy over SQLModel, ADR-0007).
 - Tests: `pytest` + `pytest-cov`, floor 80 (`--cov-fail-under=80`). Hermetic by
   default; live-service tests (postgres, Azurite) behind `RAGLAB_LIVE_DB=1`
   and skipped otherwise. Migrations prove themselves with an

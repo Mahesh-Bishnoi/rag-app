@@ -8,7 +8,8 @@ Local RAG lab (infra+skeleton v1). See `docs/intent/rag-lab.md` and `docs/decisi
 2. Install: `uv sync --group dev`
 3. Infra: `podman compose up -d`
 4. Schema (fresh volume): `uv run alembic upgrade head`
-5. Run API: `uv run uvicorn rag_lab.api.main:app --reload --port 8000`
+5. Run API (dev): `uv run fastapi dev` (reload, entrypoint in `[tool.fastapi]`);
+   prod: `uv run fastapi run`
 6. Checks: `uv run pytest`, `uv run ruff check .`, `uv run ruff format --check .`,
    `uv run mypy .` (strict), `PYTHONPATH=src uv run lint-imports`,
    `uv run deptry src alembic`, `uv audit`

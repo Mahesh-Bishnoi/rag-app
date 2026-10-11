@@ -2,7 +2,7 @@
 
 import re
 import uuid
-from typing import Any, cast
+from typing import Annotated, cast
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
@@ -31,6 +31,28 @@ class ChatCompletionRequest(BaseModel):
     messages: list[ChatMessage] = Field(min_length=1, max_length=100)
 
 
+class HealthResponse(BaseModel):
+    status: str
+    db: bool
+    blob: bool
+
+
+class ModelEntry(BaseModel):
+    id: str
+    object: str
+
+
+class ModelsResponse(BaseModel):
+    object: str
+    data: list[ModelEntry]
+
+
+class UploadResponse(BaseModel):
+    name: str
+    blob_url: str
+    bytes: int
+
+
 def _build_storage(settings: Settings, stored: StoragePort | None) -> StoragePort:
     if stored is not None:
         return stored
@@ -51,23 +73,23 @@ def create_app(settings: Settings | None = None, storage: StoragePort | None = N
         return _build_storage(resolved, stored)
 
     @app.get("/health")
-    def health() -> dict[str, Any]:
+    def health() -> HealthResponse:
         store = get_storage()
-        return {
-            "status": "ok",
-            "db": db_ping(resolved.database_url),
-            "blob": store.ping(),
-        }
+        return HealthResponse(
+            status="ok",
+            db=db_ping(resolved.database_url),
+            blob=store.ping(),
+        )
 
     @app.get("/v1/models")
-    def list_models() -> dict[str, Any]:
-        return {
-            "object": "list",
-            "data": [
-                {"id": resolved.openai_model, "object": "model"},
-                {"id": resolved.embedding_model, "object": "model"},
+    def list_models() -> ModelsResponse:
+        return ModelsResponse(
+            object="list",
+            data=[
+                ModelEntry(id=resolved.openai_model, object="model"),
+                ModelEntry(id=resolved.embedding_model, object="model"),
             ],
-        }
+        )
 
     @app.post("/v1/chat/completions")
     def chat_completions(body: ChatCompletionRequest) -> JSONResponse:
@@ -84,7 +106,7 @@ def create_app(settings: Settings | None = None, storage: StoragePort | None = N
         )
 
     @app.post("/v1/kb/upload")
-    async def kb_upload(file: UploadFile = File(...)) -> dict[str, Any]:  # noqa: B008
+    async def kb_upload(file: Annotated[UploadFile, File()]) -> UploadResponse:
         content_type = file.content_type or "application/octet-stream"
         if content_type not in ALLOWED_CONTENT_TYPES:
             raise HTTPException(status_code=415, detail="unsupported media type")
@@ -96,7 +118,7 @@ def create_app(settings: Settings | None = None, storage: StoragePort | None = N
         filename = SAFE_NAME.sub("_", file.filename or "upload")
         name = f"{uuid.uuid4()}-{filename}"
         url = get_storage().put(name, data, content_type)
-        return {"name": name, "blob_url": url, "bytes": len(data)}
+        return UploadResponse(name=name, blob_url=url, bytes=len(data))
 
     return app
 
