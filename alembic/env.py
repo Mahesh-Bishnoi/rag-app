@@ -6,7 +6,7 @@ from sqlalchemy import engine_from_config, pool
 from sqlmodel import SQLModel
 
 from alembic import context
-from rag_lab.adapters.tables import ChunkRow, DocumentRow  # noqa: F401
+from rag_lab.adapters.tables import ChunkRow, DocumentRow, TraceRow  # noqa: F401
 from rag_lab.core.config import Settings
 
 config = context.config

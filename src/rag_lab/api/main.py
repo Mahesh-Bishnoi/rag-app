@@ -21,12 +21,14 @@ from rag_lab.adapters.storage import (
     InMemoryStorage,
     StoragePort,
 )
+from rag_lab.adapters.traces import PostgresTraceStore, TraceStorePort
 from rag_lab.core.config import Settings
 from rag_lab.core.models import (
     Citation,
     Document,
     DocumentStatusView,
     IngestErrorCode,
+    QaTrace,
     Trace,
 )
 from rag_lab.worker.pipeline import blob_name
@@ -245,6 +247,12 @@ def _default_llm(resolved: Settings, stored: LlmPort | None) -> LlmPort:
     )
 
 
+def _default_trace_store(resolved: Settings, stored: TraceStorePort | None) -> TraceStorePort:
+    if stored is not None:
+        return stored
+    return PostgresTraceStore(get_engine(resolved.database_url))
+
+
 def _answer_question(
     query: str,
     model: str,
@@ -252,10 +260,11 @@ def _answer_question(
     embedder: EmbeddingPort,
     retriever: RetrievalPort,
     llm: LlmPort,
+    trace_store: TraceStorePort,
     retrieval_candidates: int,
     answer_context_chunks: int,
 ) -> ChatCompletionResponse:
-    """Embed → retrieve → rerank → generate. One IO per line; failures are 500s."""
+    """Embed → retrieve → rerank → generate → save trace fail-open."""
     trace_id = uuid.uuid4().hex
     try:
         vectors = embedder.embed([query])
@@ -299,8 +308,22 @@ def _answer_question(
             "prompt_chars": len(trace.prompt),
         },
     )
+    citations = [
+        Citation(
+            chunk_id=chunk.id or "",
+            source=chunk.title,
+            title=chunk.title,
+            heading_path=chunk.heading_path,
+            page=chunk.page,
+        )
+        for chunk in contexts
+    ]
+    try:
+        trace_store.save(trace, answer, citations)
+    except Exception:
+        logger.exception("trace save failed for %s", trace_id)
     return ChatCompletionResponse(
-        id=f"chatcmpl-{trace_id[:29]}",
+        id=f"chatcmpl-{trace_id}",
         object="chat.completion",
         created=int(time.time()),
         model=model,
@@ -311,16 +334,7 @@ def _answer_question(
                 finish_reason="stop",
             )
         ],
-        citations=[
-            Citation(
-                chunk_id=chunk.id or "",
-                source=chunk.title,
-                title=chunk.title,
-                heading_path=chunk.heading_path,
-                page=chunk.page,
-            )
-            for chunk in contexts
-        ],
+        citations=citations,
     )
 
 
@@ -344,6 +358,17 @@ def _llm_of(app: FastAPI, resolved: Settings) -> LlmPort:
     return _default_llm(resolved, cast("LlmPort | None", app.state.llm))
 
 
+def _trace_store_of(app: FastAPI, resolved: Settings) -> TraceStorePort:
+    return _default_trace_store(resolved, cast("TraceStorePort | None", app.state.trace_store))
+
+
+def _get_trace_record(trace_store: TraceStorePort, trace_id: str) -> QaTrace:
+    record = trace_store.get(trace_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="unknown trace")
+    return record
+
+
 def create_app(
     settings: Settings | None = None,
     storage: StoragePort | None = None,
@@ -351,6 +376,7 @@ def create_app(
     embedder: EmbeddingPort | None = None,
     retriever: RetrievalPort | None = None,
     llm: LlmPort | None = None,
+    trace_store: TraceStorePort | None = None,
 ) -> FastAPI:
     resolved = settings or Settings()
     app = FastAPI(title="rag-lab", version="0.1.0")
@@ -360,6 +386,7 @@ def create_app(
     app.state.embedder = embedder
     app.state.retriever = retriever
     app.state.llm = llm
+    app.state.trace_store = trace_store
 
     @app.get("/health")
     def health() -> HealthResponse:
@@ -391,9 +418,14 @@ def create_app(
             embedder=_embedder_of(app, resolved),
             retriever=_retriever_of(app, resolved),
             llm=_llm_of(app, resolved),
+            trace_store=_trace_store_of(app, resolved),
             retrieval_candidates=resolved.retrieval_candidates,
             answer_context_chunks=resolved.answer_context_chunks,
         )
+
+    @app.get("/v1/traces/{trace_id}")
+    def get_trace(trace_id: str) -> QaTrace:
+        return _get_trace_record(_trace_store_of(app, resolved), trace_id)
 
     @app.post("/v1/kb/uploads/initiate")
     def initiate_upload(body: InitiateUploadRequest) -> InitiateUploadResponse:

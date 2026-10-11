@@ -6,6 +6,7 @@ name = Layered architecture (api -> adapters/ingest -> core)
 type = layers
 layers =
     rag_lab.api
+    rag_lab.eval
     rag_lab.worker
     rag_lab.adapters
     rag_lab.ingest

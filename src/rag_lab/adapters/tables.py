@@ -11,7 +11,7 @@ from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import CheckConstraint, Column, Computed, DateTime, ForeignKey, Index, text
-from sqlalchemy.dialects.postgresql import TSVECTOR
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlmodel import Field, SQLModel
 
@@ -78,4 +78,28 @@ class ChunkRow(SQLModel, table=True):
     text_search: str | None = Field(
         default=None,
         sa_column=Column(TSVECTOR(), Computed("to_tsvector('english', content)", persisted=True)),
+    )
+
+
+class TraceRow(SQLModel, table=True):
+    """Persisted QA trace (ADR-0015). Mirrors migration 0003 exactly."""
+
+    __tablename__ = "qa_traces"
+
+    trace_id: str = Field(primary_key=True)
+    query: str
+    retrieved: list[dict[str, object]] = Field(
+        default_factory=list, sa_column=Column(JSONB, nullable=False, server_default=text("'[]'"))
+    )
+    rerank_order: list[str] = Field(
+        default_factory=list, sa_column=Column(JSONB, nullable=False, server_default=text("'[]'"))
+    )
+    prompt: str = Field(default="")
+    answer: str = Field(default="")
+    citations: list[dict[str, object]] = Field(
+        default_factory=list, sa_column=Column(JSONB, nullable=False, server_default=text("'[]'"))
+    )
+    created_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=False, server_default=text("now()")),
     )

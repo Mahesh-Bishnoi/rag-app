@@ -73,3 +73,10 @@ class Trace(BaseModel):
     retrieved: list[RetrievalResult] = Field(default_factory=list)
     rerank_order: list[str] = Field(default_factory=list)
     prompt: str = ""
+
+
+class QaTrace(Trace):
+    """Persisted per-question record: retrieval trace + final answer (ADR-0015)."""
+
+    answer: str = ""
+    citations: list[Citation] = Field(default_factory=list)

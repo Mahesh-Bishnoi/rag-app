@@ -41,5 +41,5 @@ def main() -> None:  # pragma: no cover - infinite poll loop, proved live
         time.sleep(settings.ingest_poll_seconds)
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover - process entrypoint, not importable logic
     main()

@@ -9,6 +9,7 @@ from rag_lab.adapters.embeddings import EmbeddingPort, StubEmbedding
 from rag_lab.adapters.llm_openai import LlmPort, StubLlm
 from rag_lab.adapters.retrieval import InMemoryRetrieval
 from rag_lab.adapters.storage import InMemoryStorage
+from rag_lab.adapters.traces import InMemoryTraceStore
 from rag_lab.api.main import create_app
 from rag_lab.core.config import Settings
 from rag_lab.core.models import Chunk
@@ -57,6 +58,7 @@ def make_client(
             embedder=embedder or StubEmbedding(dim=3),
             retriever=retriever if retriever is not None else InMemoryRetrieval(),
             llm=llm or stub,
+            trace_store=InMemoryTraceStore(),
         )
     )
     return client, stub
@@ -166,6 +168,7 @@ def test_chat_full_ingest_to_answer_flow() -> None:
             embedder=StubEmbedding(dim=3, value=0.5),
             retriever=retriever,
             llm=StubLlm("flow answer"),
+            trace_store=InMemoryTraceStore(),
         )
     )
     initiated = client.post(

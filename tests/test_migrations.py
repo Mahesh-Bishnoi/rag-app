@@ -12,7 +12,7 @@ from sqlmodel import SQLModel
 
 from alembic import command
 from rag_lab.adapters.db import get_engine
-from rag_lab.adapters.tables import ChunkRow, DocumentRow  # noqa: F401
+from rag_lab.adapters.tables import ChunkRow, DocumentRow, TraceRow  # noqa: F401
 from rag_lab.core.config import Settings
 
 LIVE = os.environ.get("RAGLAB_LIVE_DB") == "1"
@@ -59,16 +59,22 @@ def test_migration_upgrade_downgrade_roundtrip(
             cur.execute("SELECT version_num FROM alembic_version")
             version = cur.fetchone()
             assert version is not None
-            assert version[0] == "0002"
-            cur.execute("SELECT to_regclass('public.documents'), to_regclass('public.chunks')")
+            assert version[0] == "0003"
+            cur.execute(
+                "SELECT to_regclass('public.documents'), to_regclass('public.chunks'), "
+                "to_regclass('public.qa_traces')"
+            )
             tables = cur.fetchone()
             assert tables is not None
             assert all(table is not None for table in tables)
         assert_migrated_schema_matches_models(f"{_base_url()}/{SCRATCH_DB}")
         command.downgrade(cfg, "base")
         with psycopg.connect(f"{_base_url()}/{SCRATCH_DB}") as conn, conn.cursor() as cur:
-            cur.execute("SELECT to_regclass('public.documents'), to_regclass('public.chunks')")
-            assert cur.fetchone() == (None, None)
+            cur.execute(
+                "SELECT to_regclass('public.documents'), to_regclass('public.chunks'), "
+                "to_regclass('public.qa_traces')"
+            )
+            assert cur.fetchone() == (None, None, None)
     finally:
         with _admin_connect() as conn, conn.cursor() as cur:
             cur.execute(f"DROP DATABASE IF EXISTS {SCRATCH_DB}")

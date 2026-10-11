@@ -35,6 +35,7 @@ models land and attach to `target_metadata` in `alembic/env.py`).
 - `GET /health` → `{status, db, blob}`
 - `GET /v1/models` → configured chat + embedding model ids
 - `POST /v1/chat/completions` → hybrid retrieve (vector + BM25, RRF) → heuristic rerank → generate; strict OpenAI shape plus top-level `citations: [{chunk_id, source, title, heading_path, page}]` (empty KB → `200` with `citations: []`); per-question trace in logs (`event="qa_answered"`, `trace_id`, retrieved scores, `rerank_order`)
+- `GET /v1/traces/{trace_id}` → full persisted record `{trace_id, query, retrieved, rerank_order, prompt, answer, citations}` (`404` unknown; chat `id` is `chatcmpl-{trace_id}` in full so answers link to traces; trace writes are fail-open — a working answer stays `200` even when the save fails)
 - `POST /v1/kb/uploads/initiate` `{filename, content_type, size_bytes}` → `{document_id, upload_url, expires_in}` (15-min write-only SAS; API never proxies bytes)
 - client `PUT`s bytes to `upload_url` with matching `Content-Type`
 - `POST /v1/kb/uploads/{id}/complete` → server HEADs the blob, flips `initiated → uploaded` (missing → `upload_incomplete`, oversize → `size_exceeded`, type mismatch → `type_mismatch`, empty → `empty_content`)
@@ -49,4 +50,5 @@ Default LLM transport points at Ollama (`http://localhost:11434/v1`); swap `OPEN
 - `src/rag_lab/adapters/` — `OpenAICompatibleLlm` (chat + `StubLlm` fake), `EmbeddingPort` (OpenAI-compatible + stub fake), `StoragePort` (signed-URL issue + stat/download, Azurite + in-memory fake), `DocumentStorePort` (async lifecycle: initiate → uploaded → chunking → embedding → finished/failed; Postgres + in-memory fake), `RetrievalPort` (hybrid vector + `ts_rank` with RRF; Postgres + in-memory fake), `rerank_candidates` (heuristic overlap + phrase bonus), `db_ping`
 - `src/rag_lab/ingest/` — `LoaderPort`, `TextLoader`, `PdfLoader`, `split_chunks` (heading-aware, overlap windows)
 - `src/rag_lab/worker/` — `pipeline.drain/process_one` (claim → download → load → split → embed → finish), `run` entrypoint (`python -m rag_lab.worker.run`)
+- `src/rag_lab/eval/` — heuristic RAGAS-style harness (`metrics`: hit@k/recall/MRR, keyword coverage, groundedness; `run`: `uv run python -m rag_lab.eval.run` over `eval/golden.jsonl`, 12 seed items, exits non-zero below thresholds)
 - `compose.yaml` — `db` (pgvector:pg16, :5432), `azurite` (:10000-10002), `worker` (ingest poll loop)
