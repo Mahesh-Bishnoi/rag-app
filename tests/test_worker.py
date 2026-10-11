@@ -4,10 +4,10 @@ from conftest import minimal_pdf
 
 from rag_lab.adapters.documents import InMemoryDocumentStore
 from rag_lab.adapters.embeddings import StubEmbedding
-from rag_lab.adapters.storage import InMemoryStorage
+from rag_lab.adapters.storage import InMemoryStorage, blob_name
 from rag_lab.core.models import Chunk, Document
 from rag_lab.ingest.loaders import LoaderPort, PdfLoader, TextLoader
-from rag_lab.worker.pipeline import blob_name, drain, process_one
+from rag_lab.worker.pipeline import drain, process_one
 
 LOADERS: list[LoaderPort] = [TextLoader(), PdfLoader()]
 

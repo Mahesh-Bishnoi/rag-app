@@ -133,7 +133,7 @@ class PostgresTraceStore:
                     mime=match.mime,
                 )
                 if match is not None
-                else Chunk(id=chunk_id, content="")
+                else Chunk(id=chunk_id, content="(chunk content unavailable)")
             )
             vector = item.get("vector_score")
             bm25 = item.get("bm25_score")

@@ -8,6 +8,7 @@ layers =
     rag_lab.api
     rag_lab.eval
     rag_lab.worker
+    rag_lab.graph
     rag_lab.adapters
     rag_lab.ingest
     rag_lab.core

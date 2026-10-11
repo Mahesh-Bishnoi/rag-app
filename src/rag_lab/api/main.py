@@ -13,13 +13,13 @@ from rag_lab.adapters.db import db_ping, get_engine
 from rag_lab.adapters.documents import DocumentStorePort, PostgresDocumentStore
 from rag_lab.adapters.embeddings import EmbeddingPort, OpenAICompatibleEmbedding
 from rag_lab.adapters.llm_openai import LlmPort, OpenAICompatibleLlm
-from rag_lab.adapters.rerank import rerank_candidates
 from rag_lab.adapters.retrieval import PostgresRetrieval, RetrievalPort
 from rag_lab.adapters.storage import (
     AzuriteBlobStorage,
     BlobStat,
     InMemoryStorage,
     StoragePort,
+    blob_name,
 )
 from rag_lab.adapters.traces import PostgresTraceStore, TraceStorePort
 from rag_lab.core.config import Settings
@@ -31,7 +31,7 @@ from rag_lab.core.models import (
     QaTrace,
     Trace,
 )
-from rag_lab.worker.pipeline import blob_name
+from rag_lab.graph.qa import QaGenerationError, run_qa
 
 logger = logging.getLogger(__name__)
 SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]")
@@ -164,22 +164,6 @@ def _last_user_message(messages: list[ChatMessage]) -> str | None:
     return None
 
 
-def _grounded_prompt(query: str, contexts: list[str]) -> str:
-    if not contexts:
-        return (
-            "Answer the question directly. No knowledge-base passages "
-            f"were retrieved.\n\nQuestion: {query}\nAnswer:"
-        )
-    numbered = "\n\n".join(
-        f"[{index}] {content}" for index, content in enumerate(contexts, start=1)
-    )
-    return (
-        "Answer the question using only the passages below. "
-        "Cite the passages you use with their [n] markers.\n\n"
-        f"Passages:\n{numbered}\n\nQuestion: {query}\nAnswer:"
-    )
-
-
 def _complete_upload(
     document_id: str,
     *,
@@ -264,34 +248,32 @@ def _answer_question(
     retrieval_candidates: int,
     answer_context_chunks: int,
 ) -> ChatCompletionResponse:
-    """Embed → retrieve → rerank → generate → save trace fail-open."""
+    """Run the QA graph → save trace fail-open."""
     trace_id = uuid.uuid4().hex
     try:
-        vectors = embedder.embed([query])
-        if len(vectors) != 1:
-            raise ValueError(f"expected 1 query vector, got {len(vectors)}")
-        candidates = retriever.search(vectors[0], query, retrieval_candidates)
+        outcome = run_qa(
+            embedder=embedder,
+            retriever=retriever,
+            llm=llm,
+            query=query,
+            retrieval_candidates=retrieval_candidates,
+            answer_context_chunks=answer_context_chunks,
+        )
+    except QaGenerationError:
+        logger.exception("generation failed")
+        raise HTTPException(status_code=500, detail="generation failed") from None
     except Exception:
         logger.exception("query retrieval failed")
         raise HTTPException(status_code=500, detail="retrieval failed") from None
-    reranked = rerank_candidates(query, candidates, answer_context_chunks)
-    contexts = [result.chunk for result in reranked]
-    prompt = _grounded_prompt(query, [chunk.content for chunk in contexts])
-    try:
-        answer = llm.chat(
-            [
-                {"role": "system", "content": "You answer questions with citations."},
-                {"role": "user", "content": prompt},
-            ]
-        )
-    except Exception:
-        logger.exception("generation failed")
-        raise HTTPException(status_code=500, detail="generation failed") from None
+    candidates = outcome["candidates"]
+    reranked = outcome["reranked"]
+    prompt = outcome["prompt"]
+    answer = outcome["answer"]
     trace = Trace(
         trace_id=trace_id,
         query=query,
         retrieved=candidates,
-        rerank_order=[chunk.id or "" for chunk in contexts],
+        rerank_order=[result.chunk.id or "" for result in reranked],
         prompt=prompt,
     )
     logger.info(
@@ -310,13 +292,13 @@ def _answer_question(
     )
     citations = [
         Citation(
-            chunk_id=chunk.id or "",
-            source=chunk.title,
-            title=chunk.title,
-            heading_path=chunk.heading_path,
-            page=chunk.page,
+            chunk_id=result.chunk.id or "",
+            source=result.chunk.title,
+            title=result.chunk.title,
+            heading_path=result.chunk.heading_path,
+            page=result.chunk.page,
         )
-        for chunk in contexts
+        for result in reranked
     ]
     try:
         trace_store.save(trace, answer, citations)

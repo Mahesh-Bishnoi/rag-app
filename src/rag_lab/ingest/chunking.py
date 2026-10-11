@@ -1,9 +1,18 @@
-"""Structure-aware splitting: headings → sections, long sections → overlap windows."""
+"""Structure-aware splitting: headings → sections, long sections → overlap windows.
+
+Heading detection stays custom (markdown `#` paths); the windowing step
+delegates to LangChain's RecursiveCharacterTextSplitter (ADR-0016 seam:
+LangChain owns splitters, configured here, never bypassed).
+"""
+
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from rag_lab.core.models import Chunk
 
 DEFAULT_MAX_CHARS = 1500
 DEFAULT_OVERLAP = 200
+
+_SEPARATORS = ["\n\n", "\n", " ", ""]
 
 
 def split_chunks(
@@ -83,61 +92,7 @@ def _heading(line: str) -> tuple[int, str]:
 def _windows(text: str, max_chars: int, overlap: int) -> list[str]:
     if len(text) <= max_chars:
         return [text]
-    parts: list[str] = []
-    for paragraph in _paragraphs(text, max_chars):
-        parts.append(paragraph)
-    glued = _pack(parts, max_chars)
-    return _with_overlap(glued, max_chars, overlap)
-
-
-def _paragraphs(text: str, max_chars: int) -> list[str]:
-    parts: list[str] = []
-    for block in text.split("\n\n"):
-        block = block.strip()
-        if not block:
-            continue
-        if len(block) <= max_chars:
-            parts.append(block)
-            continue
-        parts.extend(_sentences(block, max_chars))
-    return parts
-
-
-def _sentences(block: str, max_chars: int) -> list[str]:
-    import re
-
-    pieces = re.split(r"(?<=[.!?])\s+", block.strip())
-    out: list[str] = []
-    for piece in pieces:
-        if len(piece) <= max_chars:
-            out.append(piece)
-        else:
-            out.extend(piece[i : i + max_chars] for i in range(0, len(piece), max_chars))
-    return [part for part in out if part]
-
-
-def _pack(parts: list[str], max_chars: int) -> list[str]:
-    packed: list[str] = []
-    current = ""
-    for part in parts:
-        candidate = f"{current}\n\n{part}" if current else part
-        if len(candidate) <= max_chars:
-            current = candidate
-        else:
-            if current:
-                packed.append(current)
-            current = part
-    if current:
-        packed.append(current)
-    return packed
-
-
-def _with_overlap(pieces: list[str], max_chars: int, overlap: int) -> list[str]:
-    if overlap == 0 or len(pieces) < 2:
-        return pieces
-    out = [pieces[0]]
-    for piece in pieces[1:]:
-        room = max_chars - len(piece)
-        take = min(overlap, room, len(out[-1]))
-        out.append(f"{out[-1][-take:]}{piece}" if take else piece)
-    return out
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=max_chars, chunk_overlap=overlap, separators=_SEPARATORS
+    )
+    return [part for part in splitter.split_text(text) if part.strip()]

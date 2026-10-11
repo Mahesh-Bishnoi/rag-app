@@ -13,6 +13,11 @@ logger = logging.getLogger(__name__)
 UPLOAD_URL_TTL_SECONDS = 900
 
 
+def blob_name(blob_url: str) -> str:
+    """Object key from a stored canonical blob URL (never a SAS URL)."""
+    return blob_url.rsplit("/", 1)[-1].split("?", 1)[0]
+
+
 @dataclass(frozen=True)
 class BlobStat:
     size: int
