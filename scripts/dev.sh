@@ -131,8 +131,40 @@ if [[ "$ACTUAL_DIM" != "$EMBED_DIM" ]]; then
 fi
 echo "ok: embedding dim $ACTUAL_DIM"
 
-podman compose up -d
+podman compose up -d db azurite
+
+# Wait for postgres to accept connections (matches the db healthcheck).
+tries=0
+until podman exec rag-lab-db pg_isready -U rag -d raglab >/dev/null 2>&1; do
+    tries=$((tries + 1))
+    if [[ "$tries" -ge 60 ]]; then
+        echo "error: timed out waiting for postgres" >&2
+        exit 1
+    fi
+    sleep 2
+done
+echo "ok: postgres accepting connections"
+
+# Wait for Azurite TCP. Any HTTP response counts: / answers 400 until addressed.
+tries=0
+until curl -s -o /dev/null "http://127.0.0.1:10000/"; do
+    tries=$((tries + 1))
+    if [[ "$tries" -ge 60 ]]; then
+        echo "error: timed out waiting for azurite" >&2
+        exit 1
+    fi
+    sleep 2
+done
+echo "ok: azurite reachable"
+
+# Settle the host venv and migrate BEFORE api/worker start. Host and containers
+# share ./.venv through the bind mount, and concurrent `uv sync` corrupted it
+# (broken alembic install: missing alembic.util.sqla_compat). Migrate-first
+# also keeps the app from booting against an unmigrated schema.
+uv sync --group dev --frozen
 uv run alembic upgrade head
+
+podman compose up -d api worker
 wait_for_url "http://localhost:8000/health" "api"
 
 echo ""
