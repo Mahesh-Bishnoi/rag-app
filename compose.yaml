@@ -41,16 +41,35 @@ services:
       - .:/app
     working_dir: /app
     network_mode: host
-    environment:
-      DATABASE_URL: postgresql://rag:rag@localhost:5432/raglab
-      AZURITE_CONNECTION_STRING: DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;
-      BLOB_CONTAINER: kb-raw
+    # Single source of truth is the repo .env (LLM on :8080, embeddings on
+    # :8081 via host llama-server; localhost works because of host networking).
+    env_file:
+      - .env
     depends_on:
       db:
         condition: service_healthy
       azurite:
         condition: service_started
     command: ["uv", "run", "--no-dev", "python", "-m", "rag_lab.worker.run"]
+
+  api:
+    image: ghcr.io/astral-sh/uv:python3.13-bookworm-slim
+    container_name: rag-lab-api
+    restart: unless-stopped
+    volumes:
+      - .:/app
+    working_dir: /app
+    # Host networking so OPENAI_/EMBEDDING_BASE_URL=localhost reaches the
+    # host llama-server processes (same reason as worker above).
+    network_mode: host
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
+      azurite:
+        condition: service_started
+    command: ["uv", "run", "--no-dev", "fastapi", "run", "--host", "0.0.0.0", "--port", "8000"]
 
 volumes:
   pgdata:

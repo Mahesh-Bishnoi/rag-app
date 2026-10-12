@@ -6,8 +6,10 @@ Local RAG lab (infra+skeleton v1). See `docs/intent/rag-lab.md` and `docs/decisi
 
 1. Copy env: `cp .env.example .env`
 2. Install: `uv sync --group dev`
-3. Infra: `podman compose up -d`
-4. Schema (fresh volume): `uv run alembic upgrade head`
+3. Start everything: `scripts/dev.sh` (host `llama serve` x2 on :8080/:8081
+   + `podman compose up -d` for db, azurite, api, worker + schema migrate).
+   Stop with `scripts/dev.sh down`. Manual equivalent: `podman compose up -d`,
+   `uv run alembic upgrade head`, `uv run fastapi dev`, `uv run python -m rag_lab.worker.run`.
 5. Run API (dev): `uv run fastapi dev` (reload, entrypoint in `[tool.fastapi]`);
    prod: `uv run fastapi run`
 6. Run worker (dev): `uv run python -m rag_lab.worker.run` (prod: `worker`
@@ -56,4 +58,6 @@ Start with `docs/architecture.md` for the request journeys, then:
 - `src/rag_lab/graph/` — pipeline order: `qa` (embed → retrieve → rerank → generate), `ingest` (download → load → split → embed → finish)
 - `src/rag_lab/worker/` — `pipeline.drain/process_one` over `run_ingest_one`, `run` entrypoint
 - `src/rag_lab/eval/` — heuristic RAGAS-style harness over `eval/golden.jsonl`
-- `compose.yaml` — `db` (pgvector:pg16, :5432), `azurite` (:10000-10002), `worker` (ingest poll loop)
+- `compose.yaml` — `db` (pgvector:pg16, :5432), `azurite` (:10000-10002),
+  `api` (:8000, `fastapi run`), `worker` (ingest poll loop); `llama serve` models
+  stay on the host (:8080 LLM, :8081 embeddings) via `scripts/dev.sh`
