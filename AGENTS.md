@@ -43,6 +43,16 @@
 - Python + FastAPI + Pydantic + PydanticAI + LangChain + LangGraph, with seams: LangGraph = pipeline flow, PydanticAI = typed LLM calls, LangChain = loaders/splitters (see ADR-003).
 - NVIDIA blueprint is concept reference only, not a deploy target (see ADR-001).
 
+## Skills in use (`/setup` 2026-10-11, scope: project-local)
+
+- Library wired via `.opencode/opencode.jsonc` `skills` → `/home/mahesh/code/skills/skills` (machine-local; teammates rerun `/setup`).
+- Guardrail: `skillspector` v2.12.0 (uv) + `[mcp]` extra, `SKILLSPECTOR_PROVIDER=opencode_cli`, Cisco `skill-scanner` v2.2.2 pre-installed; `/skillspector` command copied to `.opencode/tools/`+`commands/`. OpenShell declined (no CLI, no policy).
+- `@archify` (`.agents/skills/archify`, doctor ready) — Cisco FAIL 17 CRITICAL reviewed as signature overmatches (literal-arg child_process, `compile(` name matches in one test file); SkillSpector timed out on 11MB skill — user kept.
+- `@agent-browser` (CLI 0.39.0, Chrome 155, doctor 8/8; stub `.agents/skills/agent-browser`; MCP `agent-browser` core profile in `.opencode/opencode.jsonc`) — SkillSpector LOW/SAFE, Cisco SAFE — user kept.
+- `@ui-ux-pro-max` (`.opencode/skills/ui-ux-pro-max`, uipro v2.15.0, target opencode) — Cisco 2 HIGH are YARA overmatches on Uno Platform CSV doc rows — user kept.
+- `@design-taste-frontend` (`.agents/skills/design-taste-frontend`) — SkillSpector CAUTION 46 (HIGHs are documented `<!-- -->` examples, no invisible chars), Cisco SAFE — user kept.
+- Declined: drawio, browser-harness, graphify, openwiki.
+
 ## Ops gotchas
 - No build/test/lint commands, README, or CI exist yet. Don't invent commands; ask before adding toolchain.
 - Commits are SSH-signed via global gitconfig (`commit.gpgsign=true`). If a commit fails with `ssh_askpass: No such file`, the key agent is locked — ask the user to run `ssh-add ~/.ssh/id_ed25519` in their terminal, then retry. Don't bypass with `--no-gpg-sign` without explicit approval.
